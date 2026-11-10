@@ -181,7 +181,7 @@ export class ShipLayer implements Layer {
 
   emit(scene: Scene, frame: FrameInfo): void {
     if (!this.enabled || frame.zoom < 4) return;
-    const minPx = frame.zoom < 7 ? 9 : frame.zoom < 10 ? 14 : 20;
+    const minPx = frame.zoom < 7 ? 7 : frame.zoom < 10 ? 10 : frame.zoom < 13.5 ? 12 : 0;
     const b = this.bounds;
     for (const s of this.ships.values()) {
       const m = s.mover;

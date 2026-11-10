@@ -1,4 +1,4 @@
-import { M } from '../gl/meshes';
+import { M, buildAirframe, type AirframeSpec, type MeshDef } from '../gl/meshes';
 import { hash, hsl } from '../util/geo';
 
 // ICAO type designator | marketing name | airframe family | length in metres.
@@ -221,91 +221,157 @@ F35|Lockheed Martin F-35|R|15.7
 EUFI|Eurofighter Typhoon|R|16
 `;
 
-interface Family {
-  mesh: M;
-  /** Length of the family's reference mesh. */
-  base: number;
-}
+type Fam = 'N' | 'W' | 'Q' | 'R' | 'T' | 'L' | 'H';
 
-const FAMILIES: Record<string, Family> = {
-  N: { mesh: M.Narrow, base: 37.6 },
-  W: { mesh: M.Wide2, base: 66 },
-  Q: { mesh: M.Wide4, base: 72 },
-  R: { mesh: M.Regional, base: 30 },
-  T: { mesh: M.Turboprop, base: 27 },
-  L: { mesh: M.Light, base: 8.3 },
-  H: { mesh: M.Heli, base: 12.5 },
+// Real wingspans in metres where they differ from the family's usual proportion.
+const SPAN: Record<string, number> = {
+  A318: 34.1, A319: 35.8, A19N: 35.8, A320: 35.8, A20N: 35.8, A321: 35.8, A21N: 35.8, BCS1: 35.1, BCS3: 35.1,
+  A306: 44.8, A30B: 44.8, A310: 43.9, A332: 60.3, A333: 60.3, A338: 64, A339: 64, A359: 64.8, A35K: 64.8,
+  A342: 60.3, A343: 60.3, A345: 63.5, A346: 63.5, A388: 79.8, A400: 42.4,
+  B712: 28.4, B732: 28.3, B733: 28.9, B734: 28.9, B735: 28.9, B736: 34.3, B737: 35.8, B738: 35.8, B739: 35.8,
+  B37M: 35.9, B38M: 35.9, B39M: 35.9, B3XM: 35.9, B752: 38, B753: 38, B762: 47.6, B763: 47.6, B764: 51.9,
+  B772: 60.9, B77L: 64.8, B773: 60.9, B77W: 64.8, B778: 71.8, B779: 71.8, B788: 60.1, B789: 60.1, B78X: 60.1,
+  B741: 59.6, B742: 59.6, B744: 64.4, B748: 68.4, BLCF: 64.4, MD11: 51.7, DC10: 50.4,
+  MD82: 32.9, MD83: 32.9, MD88: 32.9, MD90: 32.9, E170: 26, E75L: 28.7, E75S: 26, E190: 28.7, E195: 28.7,
+  E290: 33.7, E295: 35.1, E135: 20, E145: 20, E45X: 21, CRJ1: 21.2, CRJ2: 21.2, CRJ7: 23.2, CRJ9: 24.9, CRJX: 26.2,
+  AT43: 24.6, AT45: 24.6, AT46: 24.6, AT72: 27.1, AT75: 27.1, AT76: 27.1, DH8A: 25.9, DH8B: 25.9, DH8C: 27.4, DH8D: 28.4,
+  C130: 40.4, C30J: 40.4, C17: 51.8, C5M: 67.9, K35R: 39.9, E3TF: 44.4, IL76: 50.5, IL96: 60.1, A124: 73.3, KC39: 35.1,
+  GLF4: 23.7, GLF5: 28.5, GLF6: 30.4, GLEX: 28.7, GL7T: 31.7, SU95: 27.8, C919: 35.8, P8: 37.6,
 };
+
+/** Fuselage radius by type-code prefix. */
+const RADIUS: [RegExp, number][] = [
+  [/^A38/, 3.57], [/^B74|^BLCF/, 3.25], [/^B77/, 3.1], [/^A35/, 2.98], [/^B78/, 2.89], [/^(A33|A34|A30|A31)/, 2.82],
+  [/^(MD11|DC10)/, 3.0], [/^B76/, 2.52], [/^(C17|C5M|A124|IL76)/, 3.3], [/^(K35R|E3TF)/, 1.88], [/^IL96/, 3.04],
+  [/^(A31[89]|A32|A19N|A2[01]N)/, 1.98], [/^(B73|B3|B75|P8)/, 1.88], [/^BCS/, 1.75], [/^(E17|E75|E19|E29)/, 1.5],
+  [/^(C919)/, 1.98], [/^SU95/, 1.73], [/^(C130|C30J|A400|KC39)/, 2.1], [/^AT[47]/, 1.43], [/^DH8/, 1.35],
+];
+
+const LOW_WING_PROPS = /^(SF34|SB20|JS41|B190|BE20|B350|BE9L|E120|E110|E314|PC12|TBM|P28|PA|P32|SR2|S22T|DA4|DA6|BE36|BE58|M20P)/;
+const FOUR_PROPS = /^(C130|C30J|A400|AN12|P3)$/;
+const TWIN_PISTONS = /^(PA34|PA44|DA42|DA62|BE58)$/;
+const HIGH_WING_JETS = /^(C17|C5M|IL76|A124|KC39)$/;
+
+function specFor(code: string, fam: Fam, len: number): AirframeSpec {
+  const ratio = { N: 0.95, W: 0.95, Q: 1.0, R: 0.8, T: 1.0, L: 1.3, H: 1 }[fam];
+  const span = SPAN[code] ?? len * ratio;
+  const hit = RADIUS.find(([re]) => re.test(code));
+  const prop = fam === 'T' || fam === 'L';
+  const r = hit ? hit[1] : fam === 'W' ? 2.9 : fam === 'Q' ? 3.2 : fam === 'N' ? 1.9 : fam === 'R' ? Math.max(0.9, len * 0.046) : fam === 'T' ? Math.max(0.95, len * 0.05) : len * 0.075;
+  const rootChord = Math.min(len * (prop ? 0.13 : 0.19), span * (prop ? 0.13 : 0.2));
+  const highJet = HIGH_WING_JETS.test(code);
+  return {
+    len,
+    span,
+    r,
+    wingAt: fam === 'R' ? 0.56 : fam === 'L' ? 0.32 : 0.45,
+    sweep: prop ? span * 0.015 : span * (fam === 'R' ? 0.17 : 0.21),
+    rootChord,
+    tipChord: rootChord * (prop ? 0.6 : 0.27),
+    highWing: highJet || (prop && !LOW_WING_PROPS.test(code)),
+    tTail: fam === 'R' || highJet || /^(AT[47]|DH8D|B190|BE20|B350|PC12|A400)/.test(code),
+    engines:
+      fam === 'Q' ? 'under4'
+      : fam === 'R' ? (/^(F900|FA7X|FA8X|FA50)$/.test(code) ? 'rear3' : 'rear2')
+      : fam === 'T' ? (FOUR_PROPS.test(code) ? 'prop4' : /^(PC12|C208|TBM)/.test(code) ? 'prop1' : 'prop2')
+      : fam === 'L' ? (TWIN_PISTONS.test(code) ? 'prop2' : 'prop1')
+      : 'under2',
+    hump: /^(B74|BLCF)/.test(code),
+    doubleDeck: /^A38/.test(code),
+    winglets: !prop && fam !== 'Q' && !/^(B73[2-5]|B75|B76|B772|B773|MD|DC10|E135|E145|CRJ[12])/.test(code),
+  };
+}
 
 export interface TypeInfo {
   name: string;
-  mesh: M;
   /** Real length in metres. */
   length: number;
-  /** Multiplier applied to the family mesh to reach the real size. */
+  /** Index of this type's mesh in the 3D layer; built the first time the type is seen. */
+  mesh(): number;
+  /** Multiplier on the mesh (1 for generated airframes, which are built to real size). */
   scale: number;
+}
+
+let register: (mesh: MeshDef) => number = () => M.Heli;
+/** The 3D layer hands us a way to add meshes at runtime. */
+export function setMeshRegistrar(fn: (mesh: MeshDef) => number): void {
+  register = fn;
+}
+
+function make(code: string, name: string, fam: Fam, length: number): TypeInfo {
+  if (fam === 'H') return { name, length, scale: length / 12.5, mesh: () => M.Heli };
+  let index = -1;
+  return {
+    name,
+    length,
+    scale: 1,
+    mesh: () => {
+      if (index < 0) index = register(buildAirframe(specFor(code, fam, length)));
+      return index;
+    },
+  };
 }
 
 const table = new Map<string, TypeInfo>();
 for (const line of TYPES.trim().split('\n')) {
   const [code, name, fam, len] = line.split('|');
-  const f = FAMILIES[fam];
-  table.set(code, { name, mesh: f.mesh, length: Number(len), scale: Number(len) / f.base });
+  table.set(code, make(code, name, fam as Fam, Number(len)));
 }
 
-const generic = (name: string, fam: string, length: number): TypeInfo => {
-  const f = FAMILIES[fam];
-  return { name, mesh: f.mesh, length, scale: length / f.base };
-};
-
-/** Emitter category (ADS-B) fallbacks for types we do not have in the table. */
+/** Emitter category (ADS-B) fallbacks for types that are not in the table. */
 const BY_CATEGORY: Record<string, TypeInfo> = {
-  A1: generic('', 'L', 8.5),
-  A2: generic('', 'R', 17),
-  A3: generic('', 'N', 37),
-  A4: generic('', 'N', 47),
-  A5: generic('', 'W', 64),
-  A6: generic('', 'R', 15),
-  A7: generic('', 'H', 12.5),
-  B1: generic('', 'L', 7),
-  B4: generic('', 'L', 6),
-  B6: generic('', 'L', 4),
+  A1: make('?A1', '', 'L', 8.5),
+  A2: make('?A2', '', 'R', 17),
+  A3: make('?A3', '', 'N', 37),
+  A4: make('?A4', '', 'N', 47),
+  A5: make('?A5', '', 'W', 64),
+  A6: make('?A6', '', 'R', 15),
+  A7: make('?A7', '', 'H', 12.5),
+  B1: make('?B1', '', 'L', 7),
+  B4: make('?B4', '', 'L', 6),
+  B6: make('?B6', '', 'L', 4),
 };
-const UNKNOWN = generic('', 'N', 24);
+const UNKNOWN = make('?', '', 'N', 24);
 
 export function typeInfo(type: string | undefined, category: string | undefined): TypeInfo {
   if (type) {
     const hit = table.get(type);
     if (hit) return hit;
   }
-  const byCat = category ? BY_CATEGORY[category] : undefined;
-  if (byCat) return type ? { ...byCat, name: type } : byCat;
-  return type ? { ...UNKNOWN, name: type } : UNKNOWN;
+  const base = (category && BY_CATEGORY[category]) || UNKNOWN;
+  return type ? { ...base, name: type } : base;
 }
 
-// Tail colours for well-known operators (ICAO airline designator -> [body, accent]).
+// Liveries of well-known operators: [upper fuselage, fin and winglets, belly and engines].
 const W = 0xf3f4f6;
-const LIVERY: Record<string, [number, number]> = {
-  AZU: [W, 0x1b4fa8], GLO: [W, 0xff6a13], TAM: [W, 0x2a0088], LAN: [W, 0x2a0088], LPE: [W, 0x2a0088], ARG: [W, 0x67b2e8],
-  AVA: [W, 0xe2231a], CMP: [W, 0x005aa3], AMX: [W, 0x0b2343], VOI: [W, 0xa3238e], PTB: [W, 0xf7c600],
-  AAL: [0xd9dde2, 0x0078d2], DAL: [W, 0xc8102e], UAL: [W, 0x0033a0], SWA: [0x304cb2, 0xffbf27], JBU: [W, 0x003876],
-  ASA: [W, 0x01426a], FFT: [W, 0x006643], NKS: [0xffec00, 0x111111], ACA: [W, 0xd22630], WJA: [W, 0x00a4b4],
-  FDX: [W, 0x4d148c], UPS: [W, 0x4b2e1e], DHK: [0xffcc00, 0xd40511], BCS: [0xffcc00, 0xd40511], GTI: [W, 0x003a70],
-  BAW: [W, 0x075aaa], VIR: [W, 0xe10a0a], EZY: [W, 0xff6600], EJU: [W, 0xff6600], RYR: [W, 0x073590], WZZ: [W, 0xc6007e],
-  DLH: [W, 0x05164d], EWG: [W, 0xa5027d], AFR: [W, 0x002157], TVF: [W, 0x00d66c], KLM: [0x00a1de, 0x003f72],
-  IBE: [W, 0xd7192d], VLG: [W, 0xffcc00], TAP: [W, 0x00a651], SWR: [W, 0xe2001a], AUA: [W, 0xe2001a], SAS: [W, 0x2b3087],
-  FIN: [W, 0x0b1560], NAX: [W, 0xd81939], LOT: [W, 0x11397e], AEE: [W, 0x0d2c6b], ITY: [0x0b3d91, 0xc8a45d],
-  THY: [W, 0xc70a0c], PGT: [W, 0xfdc100], UAE: [W, 0xd71921], QTR: [0xdfe0e2, 0x5c0632], ETD: [0xe9dfc8, 0xbd8b13],
-  SVA: [0xf0ead6, 0x0a6b3b], ELY: [W, 0x0038a8], MSR: [W, 0x00234b], ETH: [W, 0x078930], SAA: [W, 0xe03c31], RAM: [W, 0xc1272d],
-  SIA: [W, 0x1d4886], CPA: [W, 0x006564], QFA: [W, 0xe0001b], ANZ: [W, 0x111111], JAL: [W, 0xcc0000], ANA: [W, 0x13448f],
-  KAL: [0x9bd3e8, 0x154d9e], AAR: [W, 0x8a8d8f], CCA: [W, 0xd0021b], CES: [W, 0x1e3c8c], CSN: [W, 0x008bcb], CHH: [W, 0xe60012],
-  AIC: [W, 0xd9232d], IGO: [W, 0x1a1f71], THA: [W, 0x5b2c83], MAS: [W, 0x003a70], GIA: [W, 0x00629b], PAL: [W, 0x0033a0],
+const G = 0xc9ced4;
+type Livery = [number, number, number];
+const LIVERY: Record<string, Livery> = {
+  AZU: [W, 0x1b4fa8, 0x1b4fa8], GLO: [W, 0xff6a13, 0xff6a13], TAM: [W, 0x2a0088, G], LAN: [W, 0x2a0088, G], LPE: [W, 0x2a0088, G],
+  ARG: [W, 0x67b2e8, 0x67b2e8], AVA: [W, 0xe2231a, 0xe2231a], CMP: [W, 0x005aa3, 0x0b2a5b], AMX: [W, 0x0b2343, 0x0b2343],
+  VOI: [W, 0xa3238e, 0x8dc63f], PTB: [W, 0xf7c600, 0x1d6fb7], SKU: [W, 0xd6007f, 0xd6007f], JAT: [W, 0xff4d00, 0xff4d00],
+  AAL: [0xd9dde2, 0x0078d2, 0xb9bfc7], DAL: [W, 0xc8102e, 0x0b2a5b], UAL: [W, 0x0033a0, 0x8a9bb5], SWA: [0x304cb2, 0xffbf27, 0xc8102e],
+  JBU: [W, 0x003876, 0x003876], ASA: [W, 0x01426a, 0x01426a], FFT: [W, 0x006643, G], NKS: [0xffec00, 0x111111, 0xffec00],
+  ACA: [W, 0xd22630, 0x111111], WJA: [W, 0x00a4b4, 0x0b2a5b], FDX: [W, 0x4d148c, G], UPS: [W, 0x4b2e1e, 0x4b2e1e],
+  DHK: [0xffcc00, 0xd40511, 0xffcc00], BCS: [0xffcc00, 0xd40511, 0xffcc00], GTI: [W, 0x003a70, 0x003a70],
+  BAW: [W, 0x075aaa, 0x0b2a5b], VIR: [W, 0xe10a0a, 0xe10a0a], EZY: [W, 0xff6600, W], EJU: [W, 0xff6600, W], RYR: [W, 0x073590, 0x073590],
+  WZZ: [W, 0xc6007e, 0xc6007e], DLH: [W, 0x05164d, G], EWG: [W, 0xa5027d, G], AFR: [W, 0x002157, W], TVF: [W, 0x00d66c, W],
+  KLM: [0x00a1de, 0x00a1de, W], IBE: [W, 0xd7192d, G], VLG: [W, 0xffcc00, 0x5c6670], TAP: [W, 0x00a651, W], SWR: [W, 0xe2001a, W],
+  AUA: [W, 0xe2001a, W], SAS: [0xe6e2d8, 0x2b3087, 0x2b3087], FIN: [W, 0x0b1560, W], NAX: [W, 0xd81939, W], LOT: [W, 0x11397e, W],
+  AEE: [W, 0x0d2c6b, 0x0d2c6b], ITY: [0x0b3d91, 0xc8a45d, 0x0b3d91], THY: [W, 0xc70a0c, G], PGT: [W, 0xfdc100, W],
+  UAE: [W, 0xd71921, W], QTR: [0xdfe0e2, 0x5c0632, 0xdfe0e2], ETD: [0xe9dfc8, 0xbd8b13, 0xe9dfc8], SVA: [0xf0ead6, 0x0a6b3b, 0xf0ead6],
+  ELY: [W, 0x0038a8, W], MSR: [W, 0x00234b, W], ETH: [W, 0x078930, W], SAA: [W, 0xe03c31, W], RAM: [W, 0xc1272d, W],
+  SIA: [W, 0x1d4886, W], CPA: [W, 0x006564, G], QFA: [W, 0xe0001b, W], ANZ: [W, 0x111111, W], JAL: [W, 0xcc0000, W], ANA: [W, 0x13448f, G],
+  KAL: [0x9bd3e8, 0x9bd3e8, W], AAR: [W, 0x8a8d8f, W], CCA: [W, 0xd0021b, 0x1e3c8c], CES: [W, 0x1e3c8c, W], CSN: [W, 0x008bcb, W],
+  CHH: [W, 0xe60012, G], AIC: [W, 0xd9232d, W], IGO: [W, 0x1a1f71, 0x1a1f71], THA: [W, 0x5b2c83, W], MAS: [W, 0x003a70, W],
+  GIA: [W, 0x00629b, W], PAL: [W, 0x0033a0, W],
 };
 
-export function liveryFor(callsign: string, hex: string): [number, number] {
+/** Colours for an aircraft: a known airline livery, or a stable colour derived from its operator code. */
+export function liveryFor(callsign: string, hex: string): Livery {
   const prefix = callsign.slice(0, 3).toUpperCase();
   const known = LIVERY[prefix];
   if (known) return known;
   const h = hash(/^[A-Z]{3}/.test(prefix) ? prefix : hex);
-  return [W, hsl(h % 360, 0.62, 0.42)];
+  return [W, hsl(h % 360, 0.62, 0.42), G];
 }

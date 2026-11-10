@@ -5,6 +5,7 @@ import { Map as MlMap, AttributionControl, GeolocateControl, NavigationControl, 
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { Tier } from '../core';
 import { subSolarPoint, DEG } from '../util/geo';
+import { installFacades } from './facades';
 
 setWorkerUrl(workerUrl);
 
@@ -53,6 +54,7 @@ export class Basemap {
       fadeDuration: 150,
       cancelPendingTileRequestsWhileZooming: true,
     });
+    installFacades(map);
     const self = new Basemap(tier, mode, map);
     self.base = probe.base;
     map.addControl(new AttributionControl({ compact: true }), 'bottom-right');
@@ -256,8 +258,42 @@ export class Basemap {
             : ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 6], 0, '#ece8e1', 60, '#dfdcd6', 200, '#ccd5e0', 400, '#bccbe0'],
         'fill-extrusion-height': ['interpolate', ['linear'], ['zoom'], 13, 0, 14.2, ['coalesce', ['get', 'render_height'], 6]],
         'fill-extrusion-base': ['interpolate', ['linear'], ['zoom'], 13, 0, 14.2, ['coalesce', ['get', 'render_min_height'], 0]],
-        'fill-extrusion-opacity': mode === 'sat' ? 0.88 : 1,
+        'fill-extrusion-opacity': 1,
         'fill-extrusion-vertical-gradient': true,
+        // Walls: a generated facade chosen by the building's height, so towers get curtain walls,
+        // mid-rises get concrete or brick and houses get plaster. Flat colour until street zoom.
+        'fill-extrusion-pattern': [
+          'step', ['zoom'], '',
+          15,
+          ['let', 'h', ['coalesce', ['get', 'render_height'], 6], 'k', ['%', ['round', ['*', ['coalesce', ['get', 'render_height'], 6], 13]], 6],
+            ['concat', dark ? 'fa-n-' : 'fa-',
+              ['case',
+                ['>', ['var', 'h'], 90], ['match', ['%', ['var', 'k'], 2], 0, 'glass', 'dark'],
+                ['>', ['var', 'h'], 35], ['match', ['var', 'k'], 0, 'glass', 1, 'concrete', 2, 'white', 3, 'concrete', 4, 'dark', 'cream'],
+                ['match', ['var', 'k'], 0, 'plaster', 1, 'cream', 2, 'brick', 3, 'white', 4, 'pastel', 'plaster'],
+              ],
+            ],
+          ],
+        ],
+      },
+    };
+
+    // The facade pattern would also be painted on top of the building, so every building gets
+    // a thin separate roof slab in a roofing colour that hides it.
+    const roofs: LayerSpecification = {
+      id: 'tf-roofs',
+      type: 'fill-extrusion',
+      source: this.vectorSource,
+      'source-layer': 'building',
+      minzoom: 15,
+      filter: ['!=', ['get', 'hide_3d'], true],
+      paint: {
+        'fill-extrusion-color': dark
+          ? ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 6], 0, '#2b2f38', 60, '#353b47', 200, '#434c5c']
+          : ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 6], 0, '#b9715a', 9, '#c9b8a3', 30, '#bdbcb8', 120, '#a9b0b6'],
+        'fill-extrusion-base': ['coalesce', ['get', 'render_height'], 6],
+        'fill-extrusion-height': ['+', ['coalesce', ['get', 'render_height'], 6], 0.45],
+        'fill-extrusion-vertical-gradient': false,
       },
     };
 
@@ -310,7 +346,7 @@ export class Basemap {
     // The stock POI icons would sit under our open/closed dots; ours carry more information.
     layers = layers.filter((l) => !/^poi_r/.test(l.id));
     const at2 = layers.findIndex((l) => l.type === 'symbol');
-    layers.splice(at2 < 0 ? Math.min(at, layers.length) : at2, 0, night, buildings, ...overlays);
+    layers.splice(at2 < 0 ? Math.min(at, layers.length) : at2, 0, night, buildings, roofs, ...overlays);
     layers.push(...labels);
     style.layers = layers;
     return style;

@@ -327,7 +327,7 @@ export class TransitLayer implements Layer {
       const mesh = rail ? M.Train : v.mode === 'tram' ? M.Tram : v.mode === 'ferry' ? M.Ferry : M.Bus;
       const len = rail ? 98 : v.mode === 'tram' ? 30.6 : v.mode === 'ferry' ? 100 : 12;
       const real = v.mode === 'ferry' ? 0.4 : v.mode === 'metro' ? 0.8 : 1;
-      const minPx = rail ? (far ? 16 : 30) : v.mode === 'bus' ? (far ? 7 : 14) : far ? 10 : 20;
+      const minPx = frame.zoom >= 15 ? 0 : rail ? (far ? 12 : 16) : v.mode === 'bus' ? (far ? 5 : 8) : far ? 8 : 12;
       const scale = Math.max(real, (minPx * frame.mpp) / len);
       if (frame.zoom > 11 && frame.now - v.elevAt > 2000) {
         v.elevAt = frame.now + Math.random() * 500;

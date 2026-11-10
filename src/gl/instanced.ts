@@ -9,7 +9,7 @@ import { EARTH_C, DEG, mercScale, mercX, mercY } from '../util/geo';
 import type { MeshDef } from './meshes';
 
 /** Floats per instance. */
-const STRIDE = 14;
+const STRIDE = 17;
 
 export interface FrameInfo {
   /** Epoch ms. */
@@ -36,6 +36,12 @@ export class Scene {
   refY = 0;
   readonly bufs: Float32Array[];
   readonly counts: number[];
+
+  /** Makes room for a mesh registered after start-up. */
+  grow(): void {
+    this.bufs.push(new Float32Array(STRIDE * 16));
+    this.counts.push(0);
+  }
   private px: number[] = [];
   private py: number[] = [];
   private pz: number[] = [];
@@ -63,7 +69,7 @@ export class Scene {
    * @param climb   metres gained along the forward axis (trail segments)
    * @param c1,c2   0xRRGGBB
    */
-  add(mesh: number, mx: number, my: number, elev: number, heading: number, sx: number, sy: number, climb: number, c1: number, c2: number): void {
+  add(mesh: number, mx: number, my: number, elev: number, heading: number, sx: number, sy: number, climb: number, c1: number, c2: number, c3 = 0xd5d8dc): void {
     let buf = this.bufs[mesh];
     const n = this.counts[mesh];
     const o = n * STRIDE;
@@ -89,6 +95,9 @@ export class Scene {
     buf[o + 11] = ((c2 >> 16) & 255) / 255;
     buf[o + 12] = ((c2 >> 8) & 255) / 255;
     buf[o + 13] = (c2 & 255) / 255;
+    buf[o + 14] = ((c3 >> 16) & 255) / 255;
+    buf[o + 15] = ((c3 >> 8) & 255) / 255;
+    buf[o + 16] = (c3 & 255) / 255;
     this.counts[mesh] = n + 1;
   }
 
@@ -123,6 +132,7 @@ in vec4 i_a;
 in vec4 i_b;
 in vec3 i_c1;
 in vec3 i_c2;
+in vec3 i_c3;
 out vec4 v_color;
 
 void main() {
@@ -154,6 +164,7 @@ void main() {
   else if (part == 5) c = vec3(0.86, 0.68, 0.55);
   else if (part == 6) { c = vec3(0.0); a = 0.2; light = 1.0; }
   else if (part == 7) { c = i_c2; a = 0.85; light = 1.0; }
+  else if (part == 8) c = i_c3;
   vec3 rgb = c * mix(light, 1.0, glow);
   v_color = vec4(rgb * a, a);
 }`;
@@ -169,7 +180,7 @@ interface Program {
   uni: Record<string, WebGLUniformLocation | null>;
 }
 
-const ATTRS = ['a_pos', 'a_nrm', 'a_part', 'i_a', 'i_b', 'i_c1', 'i_c2'];
+const ATTRS = ['a_pos', 'a_nrm', 'a_part', 'i_a', 'i_b', 'i_c1', 'i_c2', 'i_c3'];
 
 export class InstancedLayer implements CustomLayerInterface {
   readonly id = 'tinyfoot-3d';
@@ -183,6 +194,7 @@ export class InstancedLayer implements CustomLayerInterface {
   frameMs = 16;
 
   private map!: MlMap;
+  private gl: WebGL2RenderingContext | null = null;
   private programs = new Map<string, Program>();
   private vaos: WebGLVertexArrayObject[] = [];
   private instBufs: WebGLBuffer[] = [];
@@ -206,7 +218,7 @@ export class InstancedLayer implements CustomLayerInterface {
 
   onAdd(map: MlMap, gl: WebGL2RenderingContext): void {
     this.map = map;
-    this.setup(gl);
+    if (!this.vaos.length) this.setup(gl);
     map.on('webglcontextlost', () => {
       this.lost = true;
     });
@@ -221,11 +233,24 @@ export class InstancedLayer implements CustomLayerInterface {
     });
   }
 
+  /** Registers a mesh built after start-up (aircraft types are generated on first sight). Returns its index. */
+  addMesh(mesh: MeshDef): number {
+    this.meshes.push(mesh);
+    this.scene.grow();
+    if (this.gl) this.upload(this.gl, mesh);
+    return this.meshes.length - 1;
+  }
+
   private setup(gl: WebGL2RenderingContext): void {
+    this.gl = gl;
     this.vaos = [];
     this.instBufs = [];
     this.meshBufs = [];
-    for (const mesh of this.meshes) {
+    for (const mesh of this.meshes) this.upload(gl, mesh);
+  }
+
+  private upload(gl: WebGL2RenderingContext, mesh: MeshDef): void {
+    {
       const vao = gl.createVertexArray()!;
       gl.bindVertexArray(vao);
       const vb = gl.createBuffer()!;
@@ -240,7 +265,7 @@ export class InstancedLayer implements CustomLayerInterface {
       const ib = gl.createBuffer()!;
       gl.bindBuffer(gl.ARRAY_BUFFER, ib);
       const bytes = STRIDE * 4;
-      const layout: [number, number, number][] = [[3, 4, 0], [4, 4, 16], [5, 3, 32], [6, 3, 44]];
+      const layout: [number, number, number][] = [[3, 4, 0], [4, 4, 16], [5, 3, 32], [6, 3, 44], [7, 3, 56]];
       for (const [loc, size, off] of layout) {
         gl.enableVertexAttribArray(loc);
         gl.vertexAttribPointer(loc, size, gl.FLOAT, false, bytes, off);

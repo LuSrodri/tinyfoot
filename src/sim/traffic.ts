@@ -113,7 +113,7 @@ export class RoadNet {
     if (!this.dirty) return;
     this.dirty = false;
     const src = this.sourceId();
-    if (zoom < 13.4 || !src) {
+    if (zoom < 14.9 || !src) {
       if (this.roads.length) {
         this.roads = [];
         this.nodes.clear();
@@ -185,8 +185,6 @@ export class RoadNet {
   }
 }
 
-const CAR_COLORS = [0xf1f3f5, 0xf1f3f5, 0xdee2e6, 0x212529, 0x212529, 0x868e96, 0xadb5bd, 0xc92a2a, 0x1c7ed6, 0x2b8a3e, 0xe8590c, 0xfcc419];
-
 abstract class Agents implements Layer {
   abstract readonly id: string;
   enabled = true;
@@ -201,6 +199,8 @@ abstract class Agents implements Layer {
   protected vel = new Float32Array(0);
   protected side = new Float32Array(0);
   protected color = new Int32Array(0);
+  protected col2 = new Int32Array(0);
+  protected col3 = new Int32Array(0);
   protected kind = new Uint8Array(0);
   protected elev = new Float32Array(0);
   protected elevAt = new Float64Array(0);
@@ -237,6 +237,8 @@ abstract class Agents implements Layer {
     this.vel = copy(this.vel, Float32Array);
     this.side = copy(this.side, Float32Array);
     this.color = copy(this.color, Int32Array);
+    this.col2 = copy(this.col2, Int32Array);
+    this.col3 = copy(this.col3, Int32Array);
     this.kind = copy(this.kind, Uint8Array);
     this.elev = copy(this.elev, Float32Array);
     this.elevAt = copy(this.elevAt, Float64Array);
@@ -385,45 +387,132 @@ abstract class Agents implements Layer {
   }
 }
 
+// ---------------------------------------------------------------- regional fleets
+// Which cars are on the road differs a lot from place to place. Each region lists its
+// best-selling models with their real dimensions; simulated cars are drawn from that mix.
+// Format: name | body (H hatch, S saloon, U SUV, P pick-up, V van, K kei/microcar, M motorcycle) | length | width | height | share
+
+const FLEETS: Record<string, string> = {
+  BR: 'Fiat Strada|P|4.47|1.73|1.6|9;VW Polo|H|4.07|1.75|1.47|8;Chevrolet Onix|H|4.16|1.73|1.47|8;Hyundai HB20|H|4.02|1.72|1.47|7;Fiat Argo|H|4|1.72|1.5|6;VW T-Cross|U|4.2|1.76|1.57|6;Hyundai Creta|U|4.3|1.79|1.63|5;Chevrolet Tracker|U|4.27|1.79|1.63|5;Fiat Mobi|H|3.57|1.63|1.5|5;Toyota Corolla|S|4.63|1.78|1.46|4;Toyota Hilux|P|5.33|1.86|1.82|4;Fiat Toro|P|4.95|1.84|1.68|4;Honda CG 160|M|2.03|0.74|1.1|14',
+  US: 'Ford F-150|P|5.89|2.03|1.96|10;Chevrolet Silverado|P|5.89|2.06|1.92|8;Ram 1500|P|5.92|2.08|1.97|6;Toyota RAV4|U|4.6|1.86|1.7|7;Honda CR-V|U|4.69|1.87|1.69|6;Tesla Model Y|U|4.75|1.92|1.62|6;Toyota Camry|S|4.92|1.84|1.45|5;Honda Civic|S|4.67|1.8|1.42|4;Toyota Corolla|S|4.63|1.78|1.44|4;Chevrolet Equinox|U|4.65|1.84|1.66|4;Ford Explorer|U|5.05|2|1.78|3;Ford Transit|V|5.98|2.06|2.5|2',
+  EU: 'VW Golf|H|4.28|1.79|1.46|8;Renault Clio|H|4.05|1.8|1.44|8;Dacia Sandero|H|4.09|1.85|1.5|8;Peugeot 208|H|4.06|1.75|1.43|7;Toyota Yaris|H|3.94|1.75|1.5|6;VW T-Roc|U|4.24|1.82|1.57|6;Tesla Model Y|U|4.75|1.92|1.62|6;Skoda Octavia|S|4.69|1.83|1.47|5;Fiat Panda|H|3.65|1.64|1.55|5;VW Tiguan|U|4.51|1.84|1.68|5;Ford Transit Custom|V|4.97|1.99|2|4;Piaggio Liberty|M|1.95|0.7|1.1|3',
+  JP: 'Honda N-BOX|K|3.4|1.48|1.79|12;Suzuki Spacia|K|3.4|1.48|1.79|8;Daihatsu Tanto|K|3.4|1.48|1.76|7;Toyota Yaris|H|3.94|1.7|1.5|8;Toyota Corolla|S|4.5|1.75|1.44|7;Toyota Sienta|V|4.26|1.7|1.7|6;Toyota Prius|S|4.6|1.78|1.43|5;Toyota Alphard|V|5|1.85|1.94|4',
+  CN: 'BYD Qin Plus|S|4.77|1.84|1.5|8;BYD Song Plus|U|4.71|1.89|1.66|7;Nissan Sylphy|S|4.64|1.82|1.45|7;Tesla Model Y|U|4.75|1.92|1.62|6;VW Lavida|S|4.68|1.81|1.47|6;BYD Seagull|H|3.78|1.72|1.54|6;Wuling Hongguang Mini EV|K|2.92|1.49|1.62|5;Haval H6|U|4.65|1.89|1.73|4;Yadea e-scooter|M|1.8|0.7|1.1|10',
+  IN: 'Hero Splendor|M|2|0.72|1.05|16;Maruti Suzuki Swift|H|3.86|1.74|1.52|9;Maruti Suzuki WagonR|K|3.66|1.62|1.68|8;Tata Nexon|U|4|1.8|1.62|7;Hyundai Creta|U|4.33|1.79|1.64|6;Maruti Suzuki Baleno|H|3.99|1.75|1.5|6;Maruti Suzuki Dzire|S|3.99|1.74|1.52|5;Mahindra Scorpio|U|4.66|1.92|1.86|4',
+  AU: 'Ford Ranger|P|5.37|1.92|1.88|9;Toyota Hilux|P|5.33|1.86|1.82|8;Toyota RAV4|U|4.6|1.86|1.7|7;Isuzu D-Max|P|5.27|1.87|1.79|5;Mazda CX-5|U|4.58|1.84|1.68|5;Toyota Corolla|H|4.37|1.79|1.44|4;Hyundai i30|H|4.34|1.8|1.46|3',
+  XX: 'Toyota Corolla|S|4.63|1.78|1.45|8;Toyota Hilux|P|5.33|1.86|1.82|7;Toyota RAV4|U|4.6|1.86|1.7|6;Hyundai Tucson|U|4.5|1.87|1.65|5;Kia Sportage|U|4.52|1.87|1.65|5;VW Polo|H|4.07|1.75|1.47|5;Toyota Yaris|H|3.94|1.7|1.5|5;Honda CG 125|M|2|0.74|1.08|8',
+};
+
+/** [code, west, south, east, north], first match wins. */
+const REGIONS: [string, number, number, number, number][] = [
+  ['JP', 129, 30, 146, 46], ['IN', 68, 6, 90, 36], ['CN', 73, 18, 135, 54], ['AU', 112, -48, 179, -10],
+  ['EU', -11, 35, 40, 71], ['US', -170, 24, -52, 72], ['BR', -82, -56, -34, 13],
+];
+
+interface Model {
+  name: string;
+  mesh: M;
+  /** Scale across/up and along, relative to the reference mesh of its body type. */
+  sx: number;
+  sy: number;
+  moto: boolean;
+}
+
+// Reference size (length, width) of each body-type mesh.
+const BODY: Record<string, [M, number, number]> = {
+  H: [M.Car, 4.05, 1.75], S: [M.Sedan, 4.65, 1.8], U: [M.Suv, 4.5, 1.85], P: [M.Pickup, 5.35, 1.9], V: [M.Van, 5, 1.95], K: [M.Kei, 3.4, 1.48], M: [M.Moto, 2.1, 0.74],
+};
+
+const fleets = new Map<string, { models: Model[]; cum: number[] }>();
+function fleetFor(lat: number, lon: number): { models: Model[]; cum: number[] } {
+  const code = REGIONS.find((r) => lon >= r[1] && lon <= r[3] && lat >= r[2] && lat <= r[4])?.[0] ?? 'XX';
+  let fleet = fleets.get(code);
+  if (!fleet) {
+    const models: Model[] = [];
+    const cum: number[] = [];
+    let total = 0;
+    for (const row of FLEETS[code].split(';')) {
+      const [name, body, len, w, , share] = row.split('|');
+      const [mesh, refLen, refW] = BODY[body];
+      models.push({ name, mesh, sx: Number(w) / refW, sy: Number(len) / refLen, moto: body === 'M' });
+      total += Number(share);
+      cum.push(total);
+    }
+    fleet = { models, cum };
+    fleets.set(code, fleet);
+  }
+  return fleet;
+}
+
+// Paint colours roughly in the proportions seen on the road.
+const CAR_COLORS = [0xf1f3f5, 0xf1f3f5, 0xf1f3f5, 0xd0d4d9, 0xd0d4d9, 0x1b1d20, 0x1b1d20, 0x6c757d, 0x6c757d, 0xa61e1e, 0x1c4f9c, 0x8c6a3f, 0x2b6e4f];
+const SKIN = [0xf6d7c3, 0xeec1a4, 0xe0ac8a, 0xc98f6b, 0xa9744f, 0x8a583a, 0x6a412b, 0x4a2c1d];
+const TROUSERS = [0x1f2a44, 0x2b2b2e, 0x3d4a5c, 0x6b6257, 0x8d8371, 0x202020, 0x35507a, 0x5a3f2e];
+
 export class TrafficLayer extends Agents {
   readonly id = 'traffic';
-  protected readonly minZoom = 13.5;
+  protected readonly minZoom = 15;
+  private fleet = fleetFor(0, 0);
+  private models: Model[] = [];
+
   protected cap(): number {
-    return 1800;
+    return 1600;
   }
   protected perKm(cls: Cls): number {
     return CARS[cls];
   }
   protected demandNow(hour: number, weekend: boolean): number {
+    const c = this.ctx.map.getCenter();
+    this.fleet = fleetFor(c.lat, c.lng);
     return carDemand(hour, weekend);
   }
   protected init(i: number, r: Road): void {
     // Busier hours mean slower arterials.
     const congestion = r.cls <= Cls.Tertiary ? 1 - 0.55 * this.demand ** 2 : 1;
-    this.vel[i] = SPEED[r.cls] * congestion * (0.8 + this.rnd() * 0.4);
     const lanes = r.cls <= Cls.Trunk ? 3 : r.cls <= Cls.Secondary ? 2 : 1;
     const lane = Math.floor(this.rnd() * lanes);
     this.side[i] = r.oneway ? (lane - (lanes - 1) / 2) * 3.3 : 1.7 + lane * 3.3;
-    this.kind[i] = r.cls <= Cls.Primary && this.rnd() < 0.08 ? 1 : 0;
-    this.color[i] = this.kind[i] ? [0xc92a2a, 0x1864ab, 0xf1f3f5, 0x2b8a3e][Math.floor(this.rnd() * 4)] : CAR_COLORS[Math.floor(this.rnd() * CAR_COLORS.length)];
+    const truck = r.cls <= Cls.Primary && this.rnd() < 0.06;
+    this.kind[i] = truck ? 255 : this.pick();
+    const model = truck ? null : this.fleet.models[this.kind[i]];
+    this.models[i] = model as Model;
+    this.vel[i] = SPEED[r.cls] * congestion * (0.8 + this.rnd() * 0.4) * (model?.moto ? 1.15 : 1);
+    if (model?.moto) this.side[i] += (this.rnd() - 0.5) * 1.6;
+    this.color[i] = truck ? [0xc92a2a, 0x1864ab, 0xf1f3f5, 0x2b8a3e][Math.floor(this.rnd() * 4)] : CAR_COLORS[Math.floor(this.rnd() * CAR_COLORS.length)];
+    this.col2[i] = model?.moto ? [0x1b1d20, 0xf1f3f5, 0xc92a2a, 0xf2c100][Math.floor(this.rnd() * 4)] : 0xb3261e;
+    this.col3[i] = TROUSERS[Math.floor(this.rnd() * TROUSERS.length)];
+  }
+  private pick(): number {
+    const { cum } = this.fleet;
+    const x = this.rnd() * cum[cum.length - 1];
+    let k = 0;
+    while (cum[k] < x) k++;
+    return k;
   }
   protected atEnd(i: number, r: Road): boolean {
     const ok = this.hop(i, r, (next) => next.cls !== Cls.Path);
-    if (ok) this.init(i, this.net.roads[this.road[i]]);
+    if (ok) {
+      const next = this.net.roads[this.road[i]];
+      const lanes = next.cls <= Cls.Trunk ? 3 : next.cls <= Cls.Secondary ? 2 : 1;
+      const lane = Math.floor(this.rnd() * lanes);
+      this.side[i] = next.oneway ? (lane - (lanes - 1) / 2) * 3.3 : 1.7 + lane * 3.3;
+      this.vel[i] = SPEED[next.cls] * (0.8 + this.rnd() * 0.4);
+    }
     return ok;
   }
-  protected draw(scene: Scene, frame: FrameInfo, i: number, mx: number, my: number, heading: number): void {
-    const truck = this.kind[i] === 1;
-    const len = truck ? 8.4 : 4.4;
-    const minPx = frame.zoom < 15 ? 4 : 6;
-    const scale = Math.max(1, (minPx * frame.mpp) / len);
-    scene.add(truck ? M.Truck : M.Car, mx, my, this.elev[i], heading, scale, scale, 0, this.color[i], 0);
+  protected draw(scene: Scene, _frame: FrameInfo, i: number, mx: number, my: number, heading: number): void {
+    // Always real size: a four-metre car on a real-width street.
+    const model = this.models[i];
+    if (!model) scene.add(M.Truck, mx, my, this.elev[i], heading, 1, 1, 0, this.color[i], 0xb3261e);
+    else scene.add(model.mesh, mx, my, this.elev[i], heading, model.sx, model.sy, 0, this.color[i], this.col2[i], this.col3[i]);
   }
 }
 
 export class PeopleLayer extends Agents {
   readonly id = 'people';
-  protected readonly minZoom = 15.3;
+  protected readonly minZoom = 16.3;
+  private height = new Float32Array(0);
+
   protected cap(): number {
     return 1400;
   }
@@ -434,10 +523,20 @@ export class PeopleLayer extends Agents {
     return walkDemand(hour, weekend);
   }
   protected init(i: number, r: Road): void {
-    this.vel[i] = 1.0 + this.rnd() * 0.7;
+    if (this.height.length < this.road.length) {
+      const next = new Float32Array(this.road.length);
+      next.set(this.height);
+      this.height = next;
+    }
+    // People are not all alike: build, height, age, skin and clothes all vary.
+    const child = this.rnd() < 0.08;
+    this.height[i] = child ? 0.6 + this.rnd() * 0.2 : 0.87 + this.rnd() * 0.2;
+    this.vel[i] = (child ? 0.9 : 1.05) + this.rnd() * 0.6;
     // On streets, walk on the pavement either side; on footpaths, anywhere across it.
     this.side[i] = r.cls === Cls.Path ? (this.rnd() - 0.5) * 2 : (this.rnd() < 0.5 ? -1 : 1) * (HALF_WIDTH[r.cls] + 0.8 + this.rnd() * 1.4);
-    this.color[i] = hsl(Math.floor(this.rnd() * 360), 0.35 + this.rnd() * 0.4, 0.3 + this.rnd() * 0.35);
+    this.color[i] = hsl(Math.floor(this.rnd() * 360), 0.25 + this.rnd() * 0.5, 0.28 + this.rnd() * 0.5);
+    this.col2[i] = SKIN[Math.floor(this.rnd() * SKIN.length)];
+    this.col3[i] = TROUSERS[Math.floor(this.rnd() * TROUSERS.length)];
   }
   protected atEnd(i: number, r: Road): boolean {
     const side = this.side[i];
@@ -452,8 +551,8 @@ export class PeopleLayer extends Agents {
     this.side[i] = -side;
     return true;
   }
-  protected draw(scene: Scene, frame: FrameInfo, i: number, mx: number, my: number, heading: number): void {
-    const scale = Math.max(1, (3.2 * frame.mpp) / 1.75);
-    scene.add(M.Person, mx, my, this.elev[i], heading, scale, scale, 0, this.color[i], 0);
+  protected draw(scene: Scene, _frame: FrameInfo, i: number, mx: number, my: number, heading: number): void {
+    const h = this.height[i] || 1;
+    scene.add(M.Person, mx, my, this.elev[i], heading, h, h, 0, this.color[i], this.col2[i], this.col3[i]);
   }
 }

@@ -75,6 +75,7 @@ class Plane {
   info: TypeInfo = typeInfo(undefined, undefined);
   c1 = 0xf3f4f6;
   c2 = 0x3a6ea5;
+  c3 = 0xc9ced4;
   ground = false;
   /** Target and displayed altitude in metres above sea level. */
   altTarget = 0;
@@ -208,7 +209,7 @@ export class AircraftLayer implements Layer {
         p.type = a.t ?? '';
         p.category = a.category ?? '';
         p.info = typeInfo(a.t, a.category);
-        [p.c1, p.c2] = liveryFor(flight, a.hex);
+        [p.c1, p.c2, p.c3] = liveryFor(flight, a.hex);
         if (p === this.selected) this.routeDirty = true;
       }
       p.reg = a.r ?? p.reg;
@@ -257,8 +258,9 @@ export class AircraftLayer implements Layer {
   emit(scene: Scene, frame: FrameInfo): void {
     if (!this.enabled) return;
     const { ctx } = this;
-    const minPx = frame.zoom < 4 ? 9 : frame.zoom < 6.5 ? 14 : frame.zoom < 9 ? 20 : 26;
-    const showShadow = frame.zoom > 9.5;
+    // Real size up close. From far away an aircraft would be smaller than a pixel, so it is
+    // enlarged just enough to remain a small marker, never a giant over the city.
+    const minPx = frame.zoom < 4 ? 7 : frame.zoom < 7 ? 10 : frame.zoom < 11 ? 12 : frame.zoom < 14.5 ? 13 : 0;
     const trails = ctx.tier.trails && frame.zoom > 5;
     const trailW = Math.max(1.6 * frame.mpp, 1.2);
 
@@ -287,10 +289,11 @@ export class AircraftLayer implements Layer {
       }
       const selected = p === this.selected;
 
-      scene.add(p.info.mesh, mx, my, elev, m.heading * DEG, scale, scale, 0, p.c1, p.c2);
-      scene.pickable(mx, my, elev, Math.max(16, minPx * 0.8), p);
+      scene.add(p.info.mesh(), mx, my, elev, m.heading * DEG, scale, scale, 0, p.c1, p.c2, p.c3);
+      scene.pickable(mx, my, elev, Math.max(16, (len * size) / frame.mpp * 0.6), p);
 
-      if (showShadow && !p.ground) {
+      // A shadow only makes sense while the aircraft is drawn near its real size.
+      if (size < 2.5 && !p.ground) {
         const s = len * size * 0.8;
         scene.add(M.Shadow, mx, my, p.groundElev + 0.6, m.heading * DEG, s * 0.9, s, 0, 0, 0);
       }

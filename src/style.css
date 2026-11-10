@@ -284,3 +284,11 @@ dialog#about form button { padding: 8px 16px; border-radius: 10px; border: 0; ba
 @media (prefers-reduced-motion: reduce) {
   .pulse, .layer[data-state='loading'] .dot { animation: none; }
 }
+
+/* The interface is hidden by default so nothing sits between you and the world. Press G to bring it back. */
+body:not(.gui) #top,
+body:not(.gui) #layers,
+body:not(.gui) #explore,
+body:not(.gui) #modes,
+body:not(.gui) #about-btn,
+body:not(.gui) .maplibregl-ctrl-group { display: none; }

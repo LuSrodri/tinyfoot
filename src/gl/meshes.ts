@@ -6,6 +6,7 @@
 //   0 body (instance colour 1)   1 accent (instance colour 2)   2 dark
 //   3 light grey                 4 glass (glows at night)       5 skin
 //   6 shadow (translucent)       7 trail (instance colour 2, translucent)
+//   8 belly / engines (instance colour 3)
 
 type V3 = [number, number, number];
 
@@ -93,6 +94,45 @@ class Builder {
     this.loft(rings, part);
   }
 
+  /** Like tube, but with smooth normals and a per-face part chosen from the sine of the angle around the tube. */
+  tubeSmooth(profile: [number, number, number, number][], sides: number, partOf: (sinA: number) => number, cx = 0): void {
+    const ring = (p: [number, number, number, number]) => {
+      const pts: V3[] = [];
+      const nrm: V3[] = [];
+      for (let i = 0; i <= sides; i++) {
+        const ang = (i / sides) * Math.PI * 2;
+        const c = Math.cos(ang), sn = Math.sin(ang);
+        pts.push([cx + c * p[1], p[0], p[3] + sn * p[2]]);
+        const nx = c / Math.max(1e-6, p[1]), nz = sn / Math.max(1e-6, p[2]);
+        const l = Math.hypot(nx, nz) || 1;
+        nrm.push([nx / l, 0, nz / l]);
+      }
+      return { pts, nrm };
+    };
+    const rings = profile.map(ring);
+    for (let k = 0; k < rings.length - 1; k++) {
+      const A = rings[k], B = rings[k + 1];
+      for (let i = 0; i < sides; i++) {
+        const part = partOf(Math.sin(((i + 0.5) / sides) * Math.PI * 2));
+        const quad: [V3, V3][] = [[A.pts[i], A.nrm[i]], [A.pts[i + 1], A.nrm[i + 1]], [B.pts[i + 1], B.nrm[i + 1]], [B.pts[i], B.nrm[i]]];
+        for (const j of [0, 1, 2, 0, 2, 3]) {
+          const [p, n] = quad[j];
+          this.v.push(p[0], p[1], p[2], n[0], n[1], n[2], part);
+        }
+      }
+    }
+    // End caps.
+    const caps: [number, number][] = [[0, -1], [rings.length - 1, 1]];
+    for (const [idx, dir] of caps) {
+      const cap = rings[idx];
+      const mid = profile[idx];
+      for (let i = 0; i < sides; i++) {
+        const tri: V3[] = [[cx, mid[0], mid[3]], cap.pts[i], cap.pts[i + 1]];
+        for (const p of tri) this.v.push(p[0], p[1], p[2], 0, dir, 0, partOf(0));
+      }
+    }
+  }
+
   /** A tapered slab: wings, fins, stabilisers. */
   slab(root: V3, rootChord: number, rootThick: number, tip: V3, tipChord: number, tipThick: number, part: number, vertical = false): void {
     const mk = (p: V3, chord: number, t: number): V3[] =>
@@ -132,7 +172,7 @@ class Builder {
 
 // ------------------------------------------------------------------ aircraft
 
-interface AirframeSpec {
+export interface AirframeSpec {
   len: number;
   span: number;
   /** Fuselage radius. */
@@ -144,117 +184,132 @@ interface AirframeSpec {
   tipChord: number;
   highWing?: boolean;
   tTail?: boolean;
-  engines: 'under2' | 'under4' | 'rear2' | 'prop2' | 'prop1' | 'rear1';
-  /** Hump on the forward upper deck. */
+  engines: 'under2' | 'under4' | 'rear2' | 'rear3' | 'prop2' | 'prop4' | 'prop1' | 'none';
+  /** Forward upper-deck hump (747). */
   hump?: boolean;
-  sides?: number;
+  /** Full-length upper deck (A380). */
+  doubleDeck?: boolean;
+  winglets?: boolean;
 }
 
-function airframe(s: AirframeSpec): MeshDef {
+/** Builds one airframe to real dimensions. Parts: 0 body, 8 belly + engines, 1 fin + winglets, 3 wings. */
+export function buildAirframe(s: AirframeSpec): MeshDef {
   const b = new Builder();
   const L = s.len, r = s.r, nose = L / 2, tail = -L / 2;
-  const sides = s.sides ?? 8;
+  const sides = L > 20 ? 14 : 10;
+  const tall = s.doubleDeck ? 1.24 : 1;
+  const lift = s.doubleDeck ? r * 0.12 : 0;
 
-  // Fuselage, tail to nose.
-  b.tube(
+  b.tubeSmooth(
     [
-      [tail, r * 0.12, r * 0.18, r * 0.55],
-      [tail + L * 0.1, r * 0.5, r * 0.55, r * 0.3],
-      [tail + L * 0.26, r, r, 0],
-      [nose - L * 0.13, r, r, 0],
-      [nose - L * 0.05, r * 0.78, r * 0.75, -r * 0.08],
-      [nose - L * 0.012, r * 0.32, r * 0.3, -r * 0.22],
-      [nose, r * 0.05, r * 0.05, -r * 0.25],
+      [tail, r * 0.1, r * 0.14, r * 0.5],
+      [tail + L * 0.06, r * 0.38, r * 0.45, r * 0.38],
+      [tail + L * 0.14, r * 0.7, r * 0.74 * tall, r * 0.2 + lift],
+      [tail + L * 0.24, r, r * tall, lift],
+      [nose - L * 0.14, r, r * tall, lift],
+      [nose - L * 0.08, r * 0.9, r * 0.88 * tall, lift - r * 0.04],
+      [nose - L * 0.04, r * 0.68, r * 0.64, -r * 0.12],
+      [nose - L * 0.015, r * 0.38, r * 0.36, -r * 0.2],
+      [nose, r * 0.04, r * 0.04, -r * 0.24],
     ],
     sides,
-    0,
+    // The lower third of the fuselage takes the belly colour.
+    (sinA) => (sinA < -0.3 ? 8 : 0),
   );
   if (s.hump) {
-    b.tube(
+    b.tubeSmooth(
       [
-        [nose - L * 0.42, r * 0.2, r * 0.2, r * 0.75],
-        [nose - L * 0.33, r * 0.72, r * 0.55, r * 0.8],
-        [nose - L * 0.1, r * 0.72, r * 0.55, r * 0.8],
-        [nose - L * 0.04, r * 0.25, r * 0.2, r * 0.45],
+        [nose - L * 0.43, r * 0.15, r * 0.15, r * 0.78],
+        [nose - L * 0.34, r * 0.7, r * 0.55, r * 0.82],
+        [nose - L * 0.1, r * 0.7, r * 0.55, r * 0.82],
+        [nose - L * 0.045, r * 0.22, r * 0.18, r * 0.45],
       ],
-      6,
-      0,
+      8,
+      () => 0,
     );
   }
 
-  // Cabin window band and cockpit glazing.
-  const wz = r * 0.18;
-  for (const side of [-1, 1]) {
-    b.box(side * r * 0.93, tail + L * 0.27, wz - r * 0.09, side * r * 1.01, nose - L * 0.15, wz + r * 0.09, 4);
+  // Cabin windows (two rows on a double-decker) and the cockpit windscreen.
+  const rows = s.doubleDeck ? [r * 0.05, r * 0.72] : [r * 0.22];
+  for (const wz of rows) {
+    for (const side of [-1, 1]) {
+      b.box(side * r * 0.95, tail + L * 0.25, wz - r * 0.07, side * r * 1.012, nose - L * 0.15, wz + r * 0.07, 4);
+    }
   }
-  b.box(-r * 0.5, nose - L * 0.085, r * 0.28, r * 0.5, nose - L * 0.05, r * 0.62, 4);
+  const cz = lift + r * (s.hump ? 0.95 : 0.3);
+  const cy = s.hump ? nose - L * 0.075 : nose - L * 0.062;
+  b.box(-r * 0.46, cy - L * 0.018, cz, r * 0.46, cy + L * 0.012, cz + r * 0.3, 4);
 
   // Wings.
   const wy = nose - L * s.wingAt;
-  const wz0 = s.highWing ? r * 0.85 : -r * 0.45;
+  const wz0 = s.highWing ? r * 0.85 : -r * 0.5;
   const half = s.span / 2;
-  const dihedral = s.highWing ? -half * 0.02 : half * 0.09;
+  const dihedral = s.highWing ? -half * 0.02 : half * 0.1;
   for (const side of [-1, 1]) {
-    b.slab(
-      [side * r * 0.5, wy, wz0], s.rootChord, r * 0.34,
-      [side * half, wy - s.sweep, wz0 + dihedral], s.tipChord, r * 0.1,
-      3,
-    );
-    if (!s.highWing && s.span > 25) {
-      // Winglet.
+    b.slab([side * r * 0.4, wy, wz0], s.rootChord, r * 0.36, [side * half, wy - s.sweep, wz0 + dihedral], s.tipChord, r * 0.09, 3);
+    if (s.winglets) {
       b.slab(
-        [side * half, wy - s.sweep, wz0 + dihedral], s.tipChord, r * 0.1,
-        [side * (half + r * 0.15), wy - s.sweep - s.tipChord * 0.4, wz0 + dihedral + r * 1.1], s.tipChord * 0.45, r * 0.06,
+        [side * half, wy - s.sweep, wz0 + dihedral], s.tipChord, r * 0.09,
+        [side * (half + r * 0.2), wy - s.sweep - s.tipChord * 0.45, wz0 + dihedral + Math.max(1.2, s.span * 0.045)], s.tipChord * 0.4, r * 0.05,
         1,
       );
     }
   }
 
   // Fin and tailplane.
-  const finRootY = tail + L * 0.1;
-  const finH = Math.max(r * 2.6, L * 0.14);
-  b.slab([0, finRootY + L * 0.01, r * 0.7], L * 0.15, r * 0.22, [0, finRootY - L * 0.055, r * 0.7 + finH], L * 0.065, r * 0.1, 1, true);
+  const finRootY = tail + L * 0.095;
+  const finH = Math.max(r * 2.5, L * 0.15);
+  b.slab([0, finRootY + L * 0.015, r * 0.7 + lift], L * 0.155, r * 0.22, [0, finRootY - L * 0.06, r * 0.7 + lift + finH], L * 0.06, r * 0.09, 1, true);
   const stabZ = s.tTail ? r * 0.7 + finH : r * 0.35;
-  const stabY = s.tTail ? finRootY - L * 0.055 : finRootY - L * 0.02;
+  const stabY = s.tTail ? finRootY - L * 0.06 : finRootY - L * 0.02;
   const stabHalf = s.span * 0.19;
   for (const side of [-1, 1]) {
-    b.slab([side * r * 0.15, stabY, stabZ], L * 0.085, r * 0.16, [side * stabHalf, stabY - L * 0.045, stabZ + (s.tTail ? 0 : stabHalf * 0.06)], L * 0.04, r * 0.07, 3);
+    b.slab([side * r * 0.12, stabY, stabZ], L * 0.085, r * 0.16, [side * stabHalf, stabY - L * 0.05, stabZ + (s.tTail ? 0 : stabHalf * 0.08)], L * 0.038, r * 0.06, 3);
   }
 
   // Engines.
-  const nacelle = (x: number, y: number, z: number, er: number, el: number) => {
-    b.tube([[y - el / 2, er * 0.7, er * 0.7, z], [y, er, er, z], [y + el / 2, er * 0.92, er * 0.92, z]], 6, 3, x);
-    b.tube([[y + el / 2 - 0.01, er * 0.8, er * 0.8, z], [y + el / 2 + el * 0.04, er * 0.75, er * 0.75, z]], 6, 2, x);
+  const jet = (x: number, y: number, z: number, er: number, el: number, pylonTo?: number) => {
+    b.tubeSmooth([[y - el * 0.5, er * 0.55, er * 0.55, z], [y - el * 0.15, er * 0.9, er * 0.9, z], [y + el * 0.3, er, er, z], [y + el * 0.5, er * 0.93, er * 0.93, z]], 10, () => 8, x);
+    b.tubeSmooth([[y + el * 0.5 - 0.02, er * 0.86, er * 0.86, z], [y + el * 0.5 + 0.03, er * 0.82, er * 0.82, z]], 10, () => 2, x);
+    b.tubeSmooth([[y - el * 0.72, er * 0.12, er * 0.12, z], [y - el * 0.5, er * 0.42, er * 0.42, z]], 8, () => 3, x);
+    if (pylonTo !== undefined) b.box(x - er * 0.1, y - el * 0.35, z + er * 0.8, x + er * 0.1, y + el * 0.2, pylonTo, 3);
   };
-  const prop = (x: number, y: number, z: number, pr: number) => {
-    b.box(x - pr, y, z - pr * 0.07, x + pr, y + pr * 0.05, z + pr * 0.07, 2);
-    b.box(x - pr * 0.07, y, z - pr, x + pr * 0.07, y + pr * 0.05, z + pr, 2);
+  const prop = (x: number, y: number, z: number, pr: number, nr: number, nl: number) => {
+    b.tubeSmooth([[y - nl, nr * 0.5, nr * 0.5, z], [y - nl * 0.3, nr, nr, z], [y, nr * 0.75, nr * 0.75, z], [y + nr * 0.6, nr * 0.1, nr * 0.1, z]], 8, () => 8, x);
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI;
+      const dx = Math.cos(a) * pr, dz = Math.sin(a) * pr;
+      b.slab([x - dx, y + nr * 0.25, z - dz], pr * 0.09, 0.05, [x + dx, y + nr * 0.25, z + dz], pr * 0.09, 0.05, 2);
+    }
   };
-  const er = r * 0.62;
-  const el = L * 0.11;
+  const er = s.engines === 'under4' ? r * 0.5 : Math.min(r * 0.72, Math.max(r * 0.55, s.span * 0.028));
+  const el = er * 3.3;
   if (s.engines === 'under2' || s.engines === 'under4') {
-    const spots = s.engines === 'under2' ? [0.32] : [0.3, 0.58];
-    for (const f of spots) {
+    for (const f of s.engines === 'under2' ? [0.33] : [0.3, 0.6]) {
       for (const side of [-1, 1]) {
-        nacelle(side * half * f, wy - s.sweep * f + s.rootChord * 0.42, wz0 + dihedral * f - er * 1.15, er, el);
+        const wingZ = wz0 + dihedral * f;
+        jet(side * half * f, wy - s.sweep * f + s.rootChord * (0.5 - f * 0.25), wingZ - er * 1.25, er, el, wingZ);
       }
     }
-  } else if (s.engines === 'rear2') {
-    for (const side of [-1, 1]) nacelle(side * (r + er * 0.95), tail + L * 0.24, r * 0.35, er * 0.85, el);
-  } else if (s.engines === 'prop2') {
-    for (const side of [-1, 1]) {
-      const x = side * half * 0.3;
-      const y = wy + s.rootChord * 0.45;
-      nacelle(x, y, wz0 - er * 0.5, er * 0.6, el * 1.3);
-      prop(x, y + el * 0.7, wz0 - er * 0.5, r * 1.35);
+  } else if (s.engines === 'rear2' || s.engines === 'rear3') {
+    for (const side of [-1, 1]) jet(side * (r + er * 0.9), tail + L * 0.25, r * 0.35, er * 0.85, el * 0.85);
+    if (s.engines === 'rear3') jet(0, tail + L * 0.12, r * 1.25, er * 0.8, el * 0.8);
+  } else if (s.engines === 'prop2' || s.engines === 'prop4') {
+    for (const f of s.engines === 'prop2' ? [0.3] : [0.24, 0.5]) {
+      for (const side of [-1, 1]) prop(side * half * f, wy + s.rootChord * 0.75, wz0 - r * 0.25, Math.max(1.3, s.span * 0.07), r * 0.42, s.rootChord * 1.1);
     }
   } else if (s.engines === 'prop1') {
-    prop(0, nose, -r * 0.2, r * 1.5);
+    for (let i = 0; i < 2; i++) {
+      const a = (i / 2) * Math.PI;
+      const pr = r * 1.5;
+      b.slab([-Math.cos(a) * pr, nose + 0.05, -r * 0.24 - Math.sin(a) * pr], pr * 0.1, 0.04, [Math.cos(a) * pr, nose + 0.05, -r * 0.24 + Math.sin(a) * pr], pr * 0.1, 0.04, 2);
+    }
   }
 
-  // Gear stubs so parked aircraft sit on something.
-  b.box(-r * 0.12, nose - L * 0.1, -r * 1.55, r * 0.12, nose - L * 0.085, -r * 0.9, 2);
-  for (const side of [-1, 1]) b.box(side * r * 0.95 - r * 0.14, wy - s.rootChord * 0.2, -r * 1.55, side * r * 0.95 + r * 0.14, wy - s.rootChord * 0.05, -r * 0.7, 2);
+  // Landing gear.
+  const gear = r * 1.6;
+  b.box(-r * 0.1, nose - L * 0.105, -gear, r * 0.1, nose - L * 0.09, -r * 0.9, 2);
+  for (const side of [-1, 1]) b.box(side * r * 1.0 - r * 0.13, wy - s.rootChord * 0.22, -gear, side * r * 1.0 + r * 0.13, wy - s.rootChord * 0.04, -r * 0.6, 2);
 
   return b.build(L);
 }
@@ -329,31 +384,143 @@ function bus(): MeshDef {
   return b.build(12);
 }
 
-function car(): MeshDef {
-  const b = new Builder();
-  b.box(-0.9, -2.2, 0.3, 0.9, 2.2, 0.95, 0);
-  b.box(-0.8, -1.3, 0.95, 0.8, 0.75, 1.45, 4);
-  b.box(-0.78, -1.2, 1.45, 0.78, 0.6, 1.52, 0);
-  for (const y of [-1.45, 1.4]) b.box(-0.95, y - 0.33, 0, 0.95, y + 0.33, 0.45, 2);
-  b.box(-0.7, 2.19, 0.6, 0.7, 2.23, 0.8, 3);
-  return b.build(4.4);
+// ------------------------------------------------------------------- road vehicles
+
+interface CarSpec {
+  len: number;
+  w: number;
+  /** Roof height above the ground. */
+  h: number;
+  /** Bonnet length and boot length as fractions of the body; a hatchback has almost no boot. */
+  hood: number;
+  boot: number;
+  /** Open load bed (pick-up) instead of a boot. */
+  bed?: boolean;
+  /** Height of the body below the windows. */
+  belt: number;
+  wheel: number;
+  clearance: number;
 }
 
-function truck(): MeshDef {
+function wheel(b: Builder, x: number, y: number, r: number, w: number): void {
+  const n = 10;
+  const ring = (xx: number, rr: number): V3[] => Array.from({ length: n }, (_, i) => {
+    const a = (i / n) * Math.PI * 2;
+    return [xx, y + Math.cos(a) * rr, r + Math.sin(a) * rr] as V3;
+  });
+  b.loft([ring(x - w / 2, r), ring(x + w / 2, r)], 2);
+  // Hub cap on the outer face.
+  const out = x > 0 ? x + w / 2 + 0.005 : x - w / 2 - 0.005;
+  b.loft([ring(out, r * 0.55), ring(out + (x > 0 ? 0.01 : -0.01), r * 0.5)], 3);
+}
+
+function roadCar(s: CarSpec): MeshDef {
   const b = new Builder();
-  b.box(-1.2, 2.3, 0.5, 1.2, 4.2, 2.9, 0);
-  b.box(-1.1, 4.18, 1.6, 1.1, 4.24, 2.6, 4);
-  b.box(-1.25, -4.2, 0.9, 1.25, 2.1, 3.6, 3);
-  for (const y of [-3.2, -2.2, 3.2]) b.box(-1.25, y - 0.45, 0, 1.25, y + 0.45, 0.9, 2);
-  return b.build(8.4);
+  const x = s.w / 2;
+  const y0 = -s.len / 2, y1 = s.len / 2;
+  const z0 = s.clearance, zb = s.belt, zr = s.h;
+  const cabF = y1 - s.len * s.hood;          // base of the windscreen
+  const cabR = y0 + s.len * s.boot;          // base of the rear window
+  const rect = (xa: number, ya: number, yb: number, z: number): V3[] => [[-xa, ya, z], [xa, ya, z], [xa, yb, z], [-xa, yb, z]];
+
+  // Lower body, slightly tucked in at the sills and rounded at both ends.
+  b.loft([rect(x * 0.94, y0 + 0.12, y1 - 0.15, z0), rect(x, y0, y1, (z0 + zb) / 2), rect(x * 0.97, y0 + 0.04, y1 - 0.06, zb)], 0);
+  // Bumpers and grille.
+  b.box(-x * 0.98, y1 - 0.06, z0, x * 0.98, y1 + 0.03, z0 + 0.22, 2);
+  b.box(-x * 0.98, y0 - 0.03, z0, x * 0.98, y0 + 0.06, z0 + 0.22, 2);
+  b.box(-x * 0.5, y1 + 0.005, zb - 0.32, x * 0.5, y1 + 0.03, zb - 0.14, 2);
+  // Head lamps (light) and tail lamps (accent colour = red).
+  for (const side of [-1, 1]) {
+    b.box(side * x * 0.9 - 0.16, y1 - 0.02, zb - 0.26, side * x * 0.9 + 0.1, y1 + 0.035, zb - 0.1, 3);
+    b.box(side * x * 0.9 - 0.14, y0 - 0.035, zb - 0.24, side * x * 0.9 + 0.1, y0 + 0.02, zb - 0.08, 1);
+  }
+
+  if (s.bed) {
+    // Pick-up: short cab, then an open bed with walls.
+    const cabEnd = cabF - s.len * 0.3;
+    b.loft([rect(x * 0.95, cabEnd, cabF, zb), rect(x * 0.84, cabEnd + 0.08, cabF - 0.55, zr - 0.06)], 4);
+    b.box(-x * 0.84, cabEnd + 0.08, zr - 0.06, x * 0.84, cabF - 0.55, zr, 0);
+    b.box(-x * 0.97, y0 + 0.05, zb, -x * 0.9, cabEnd, zb + 0.28, 0);
+    b.box(x * 0.9, y0 + 0.05, zb, x * 0.97, cabEnd, zb + 0.28, 0);
+    b.box(-x * 0.97, y0 + 0.04, zb, x * 0.97, y0 + 0.11, zb + 0.28, 0);
+    b.box(-x * 0.9, y0 + 0.11, zb - 0.1, x * 0.9, cabEnd, zb + 0.02, 2);
+  } else {
+    // Glasshouse: glass all round, tapering to a narrower roof, with pillars at the corners.
+    const roofF = cabF - (zr - zb) * 0.9;
+    const roofR = cabR + (zr - zb) * (s.boot < 0.08 ? 0.25 : 0.75);
+    b.loft([rect(x * 0.95, cabR, cabF, zb), rect(x * 0.82, roofR, roofF, zr - 0.05)], 4);
+    b.box(-x * 0.82, roofR, zr - 0.05, x * 0.82, roofF, zr, 0);
+    for (const side of [-1, 1]) {
+      const mid = (roofF + roofR) / 2;
+      b.slab([side * x * 0.955, mid, zb], 0.14, 0.04, [side * x * 0.83, mid, zr - 0.03], 0.12, 0.04, 0, true);
+      b.box(side * x * 1.0, cabF - 0.35, zb - 0.02, side * (x + 0.12), cabF - 0.2, zb + 0.1, 0);
+    }
+  }
+  for (const yy of [y1 - s.len * 0.17, y0 + s.len * 0.18]) for (const side of [-1, 1]) wheel(b, side * (x - 0.1), yy, s.wheel, 0.21);
+  return b.build(s.len);
+}
+
+function motorcycle(): MeshDef {
+  const b = new Builder();
+  wheel(b, 0, 0.72, 0.3, 0.11);
+  wheel(b, 0, -0.68, 0.3, 0.13);
+  b.box(-0.13, -0.45, 0.42, 0.13, 0.5, 0.78, 0);
+  b.box(-0.11, -0.75, 0.72, 0.11, -0.1, 0.86, 2);
+  b.box(-0.34, 0.5, 0.98, 0.34, 0.56, 1.03, 2);
+  b.slab([0, 0.68, 0.32], 0.08, 0.07, [0, 0.5, 1.0], 0.08, 0.07, 3, true);
+  // Rider: legs, torso, arms, helmet.
+  b.box(-0.2, -0.25, 0.8, 0.2, 0.15, 1.02, 8);
+  b.slab([0, -0.2, 0.98], 0.3, 0.38, [0, 0.12, 1.5], 0.26, 0.4, 8, true);
+  for (const side of [-1, 1]) b.slab([side * 0.22, 0.1, 1.42], 0.1, 0.1, [side * 0.3, 0.5, 1.06], 0.08, 0.08, 8);
+  b.tube([[0.0, 0.05, 0.05, 1.68], [0.06, 0.14, 0.14, 1.66], [0.2, 0.15, 0.15, 1.64], [0.32, 0.08, 0.08, 1.62]], 8, 1);
+  return b.build(2.1);
 }
 
 function person(): MeshDef {
   const b = new Builder();
-  b.box(-0.16, -0.1, 0, 0.16, 0.1, 0.8, 2);
-  b.box(-0.22, -0.13, 0.8, 0.22, 0.13, 1.45, 0);
-  b.box(-0.11, -0.11, 1.47, 0.11, 0.11, 1.72, 5);
-  return b.build(1.75);
+  // Shoes, legs (colour 3), torso and sleeves (colour 1), hands, neck and face (colour 2), hair.
+  for (const side of [-1, 1]) {
+    b.box(side * 0.1 - 0.065, -0.1, 0, side * 0.1 + 0.065, 0.16, 0.08, 2);
+    const leg = (hx: number, hy: number, zz: number): V3[] => [[side * 0.1 - hx, -hy, zz], [side * 0.1 + hx, -hy, zz], [side * 0.1 + hx, hy, zz], [side * 0.1 - hx, hy, zz]];
+    b.loft([leg(0.06, 0.07, 0.08), leg(0.075, 0.085, 0.45), leg(0.09, 0.1, 0.86)], 8);
+  }
+  b.loft(
+    [
+      [[-0.17, -0.1, 0.84], [0.17, -0.1, 0.84], [0.17, 0.11, 0.84], [-0.17, 0.11, 0.84]],
+      [[-0.2, -0.11, 1.15], [0.2, -0.11, 1.15], [0.2, 0.12, 1.15], [-0.2, 0.12, 1.15]],
+      [[-0.22, -0.1, 1.42], [0.22, -0.1, 1.42], [0.22, 0.1, 1.42], [-0.22, 0.1, 1.42]],
+      [[-0.1, -0.07, 1.48], [0.1, -0.07, 1.48], [0.1, 0.07, 1.48], [-0.1, 0.07, 1.48]],
+    ],
+    0,
+  );
+  for (const side of [-1, 1]) {
+    b.box(side * 0.27 - 0.05, -0.06, 0.92, side * 0.27 + 0.05, 0.06, 1.42, 0);
+    b.box(side * 0.27 - 0.045, -0.05, 0.82, side * 0.27 + 0.045, 0.05, 0.92, 1);
+  }
+  b.box(-0.05, -0.05, 1.46, 0.05, 0.05, 1.54, 1);
+  const head: V3[][] = [];
+  for (const [z, r] of [[1.52, 0.06], [1.58, 0.1], [1.66, 0.11], [1.73, 0.09], [1.77, 0.04]]) {
+    head.push(Array.from({ length: 8 }, (_, i) => {
+      const a = (i / 8) * Math.PI * 2;
+      return [Math.cos(a) * r, Math.sin(a) * r * 1.1, z] as V3;
+    }));
+  }
+  b.loft(head.slice(0, 3), 1);
+  b.loft(head.slice(2), 2);
+  return b.build(1.78);
+}
+
+function truck(): MeshDef {
+  const b = new Builder();
+  // Cab-over tractor unit with a box trailer.
+  b.loft([[[-1.22, 3.6, 0.55], [1.22, 3.6, 0.55], [1.22, 5.5, 0.55], [-1.22, 5.5, 0.55]], [[-1.22, 3.6, 2.2], [1.22, 3.6, 2.2], [1.22, 5.5, 2.2], [-1.22, 5.5, 2.2]], [[-1.15, 3.6, 3.0], [1.15, 3.6, 3.0], [1.15, 5.25, 3.0], [-1.15, 5.25, 3.0]]], 0);
+  b.box(-1.1, 5.4, 1.75, 1.1, 5.52, 2.75, 4);
+  for (const side of [-1, 1]) b.box(side * 1.16, 4.3, 1.8, side * 1.24, 5.2, 2.7, 4);
+  b.box(-1.2, 5.45, 0.5, 1.2, 5.56, 0.95, 2);
+  b.box(-1.27, -5.6, 1.15, 1.27, 3.35, 3.9, 3);
+  b.box(-1.0, -5.5, 0.75, 1.0, 5.0, 1.15, 2);
+  for (const y of [-4.6, -3.4, 2.5, 4.6]) for (const side of [-1, 1]) wheel(b, side * 1.05, y, 0.52, 0.3);
+  return b.build(11.2);
 }
 
 function satellite(): MeshDef {
@@ -386,12 +553,6 @@ function segment(): MeshDef {
 export enum M {
   Shadow,
   Segment,
-  Narrow,
-  Wide2,
-  Wide4,
-  Regional,
-  Turboprop,
-  Light,
   Heli,
   Cargo,
   Ferry,
@@ -402,6 +563,12 @@ export enum M {
   Truck,
   Person,
   Sat,
+  Sedan,
+  Suv,
+  Pickup,
+  Van,
+  Kei,
+  Moto,
 }
 
 /** Built in the same order as the `M` enum. */
@@ -409,21 +576,21 @@ export function buildMeshes(): MeshDef[] {
   return [
     shadow(),
     segment(),
-    airframe({ len: 37.6, span: 35.8, r: 1.98, wingAt: 0.46, sweep: 7.5, rootChord: 6.6, tipChord: 1.7, engines: 'under2' }),
-    airframe({ len: 66, span: 63, r: 3.0, wingAt: 0.46, sweep: 15, rootChord: 12.5, tipChord: 2.6, engines: 'under2' }),
-    airframe({ len: 72, span: 76, r: 3.6, wingAt: 0.45, sweep: 17, rootChord: 15, tipChord: 3.2, engines: 'under4', hump: true }),
-    airframe({ len: 30, span: 23, r: 1.3, wingAt: 0.55, sweep: 5, rootChord: 4.6, tipChord: 1.2, engines: 'rear2', tTail: true }),
-    airframe({ len: 27, span: 27, r: 1.35, wingAt: 0.42, sweep: 0.4, rootChord: 2.9, tipChord: 1.6, engines: 'prop2', highWing: true, tTail: true }),
-    airframe({ len: 8.3, span: 11, r: 0.62, wingAt: 0.3, sweep: 0, rootChord: 1.6, tipChord: 1.2, engines: 'prop1', highWing: true, sides: 6 }),
     helicopter(),
     ship(true),
     ship(false),
     bus(),
     rail(4, 24, 3.0, 3.1),
     rail(2, 15, 2.5, 2.7),
-    car(),
+    roadCar({ len: 4.05, w: 1.75, h: 1.48, hood: 0.26, boot: 0.03, belt: 0.92, wheel: 0.3, clearance: 0.17 }),
     truck(),
     person(),
     satellite(),
+    roadCar({ len: 4.65, w: 1.8, h: 1.45, hood: 0.26, boot: 0.2, belt: 0.9, wheel: 0.31, clearance: 0.16 }),
+    roadCar({ len: 4.5, w: 1.85, h: 1.68, hood: 0.25, boot: 0.03, belt: 1.05, wheel: 0.36, clearance: 0.22 }),
+    roadCar({ len: 5.35, w: 1.9, h: 1.8, hood: 0.24, boot: 0, bed: true, belt: 1.1, wheel: 0.4, clearance: 0.25 }),
+    roadCar({ len: 5, w: 1.95, h: 2, hood: 0.12, boot: 0.01, belt: 1.15, wheel: 0.34, clearance: 0.2 }),
+    roadCar({ len: 3.4, w: 1.48, h: 1.7, hood: 0.14, boot: 0.01, belt: 0.95, wheel: 0.27, clearance: 0.16 }),
+    motorcycle(),
   ];
 }

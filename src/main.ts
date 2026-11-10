@@ -2,6 +2,7 @@ import './style.css';
 import { Popup } from 'maplibre-gl';
 import { detectTier, getJson, tierFor, type Ctx, type Layer, type Quality, type Selection } from './core';
 import { AircraftLayer } from './data/aircraft';
+import { setMeshRegistrar } from './data/aircraftTypes';
 import { PlacesLayer } from './data/places';
 import { SatelliteLayer } from './data/satellites';
 import { ShipLayer } from './data/ships';
@@ -181,6 +182,7 @@ async function main(): Promise<void> {
     nightAt,
   );
   layer3d.maxFps = tier.maxFps;
+  setMeshRegistrar((mesh) => layer3d.addMesh(mesh));
   base.attach(layer3d);
 
   const popup = new Popup({ closeButton: true, maxWidth: '260px', offset: 10 });
@@ -226,6 +228,25 @@ async function main(): Promise<void> {
     map.getCanvas().style.cursor = layer3d.pick(e.point.x, e.point.y) ? 'pointer' : '';
   });
 
+  // ------------------------------------------------------------ auto tilt
+  // Seen from straight above, 3D buildings, terrain and aircraft all look flat. So the camera
+  // leans over by itself as you zoom in: top-down at globe scale, about 58 degrees at street scale.
+  // As soon as you (or a fly-to) set the tilt yourself it stops, until you zoom back out to the globe.
+  let autoTilt = true;
+  map.setTransformCameraUpdate((next) => {
+    const current = map.getPitch();
+    if (Math.abs(next.pitch - current) > 0.01) {
+      autoTilt = false;
+      return {};
+    }
+    if (next.zoom < 5) autoTilt = true;
+    if (!autoTilt) return {};
+    const f = Math.max(0, Math.min(1, (next.zoom - 5.5) / 7));
+    const target = 58 * f * f * (3 - 2 * f);
+    return Math.abs(target - current) > 0.01 ? { pitch: target } : {};
+  });
+  if (map.getPitch() < 1) map.jumpTo({ zoom: map.getZoom() });
+
   // ---------------------------------------------------------------- modes
   const modes = $('modes');
   const modeLabel: Record<Mode, Key> = { mini: 'modeMini', map: 'modeMap', sat: 'modeSat', night: 'modeNight' };
@@ -264,6 +285,17 @@ async function main(): Promise<void> {
   map.on('pitch', updateBlur);
   applyModeClass();
   updateBlur();
+
+  // No interface by default. G shows or hides it, M steps through the view modes.
+  if (store.get('gui', false) || new URLSearchParams(location.search).has('gui')) document.body.classList.add('gui');
+  window.addEventListener('keydown', (e) => {
+    if (e.target instanceof HTMLInputElement || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'g' || e.key === 'G') store.set('gui', document.body.classList.toggle('gui'));
+    if (e.key === 'm' || e.key === 'M') {
+      const next = MODES[(MODES.indexOf(base.mode) + 1) % MODES.length];
+      modes.querySelector<HTMLButtonElement>(`button[data-mode="${next}"]`)?.click();
+    }
+  });
 
   // --------------------------------------------------------------- layers
   const panel = $('layers');
@@ -398,6 +430,7 @@ async function main(): Promise<void> {
   const setQuality = (quality: Quality, persist: boolean): void => {
     Object.assign(tier, tierFor(quality));
     layer3d.maxFps = tier.maxFps;
+  setMeshRegistrar((mesh) => layer3d.addMesh(mesh));
     base.applyTier();
     applyModeClass();
     qualitySel.value = quality;
