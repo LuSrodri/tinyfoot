@@ -1,0 +1,32 @@
+{
+  "name": "tinyfoot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A live, tilt-shift 3D miniature of the whole planet.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "concurrently -k -n web,api \"vite\" \"wrangler dev --port 8787\"",
+    "dev:web": "vite",
+    "dev:api": "wrangler dev --port 8787",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "npm run build && wrangler dev --port 8787",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "maplibre-gl": "^6.17.0",
+    "opening_hours": "^3.15.0",
+    "satellite.js": "^7.1.0",
+    "tz-lookup": "^6.1.25"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261110.1",
+    "@types/geojson": "^7946.0.16",
+    "@types/node": "^26.6.6",
+    "concurrently": "^10.0.7",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.7",
+    "wrangler": "^4.160.0"
+  }
+}

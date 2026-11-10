@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>tinyfoot — the planet in miniature, live</title>
+    <meta name="description" content="A live, tilt-shift 3D miniature of the whole planet: real aircraft, satellites, ships, trains and buses moving in real time over real terrain and buildings." />
+    <meta name="theme-color" content="#0f1720" />
+    <meta property="og:title" content="tinyfoot" />
+    <meta property="og:description" content="The planet in miniature, live." />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin />
+    <link rel="preconnect" href="https://tiles.mapterhorn.com" crossorigin />
+  </head>
+  <body>
+    <div id="map" aria-label="Map"></div>
+
+    <div id="tiltshift" aria-hidden="true">
+      <div class="band top"><i></i><i></i><i></i></div>
+      <div class="band bottom"><i></i><i></i><i></i></div>
+      <div class="vignette"></div>
+    </div>
+
+    <header id="top">
+      <div class="brand" title="tinyfoot">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8" /><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18" fill="none" stroke="currentColor" stroke-width="1.4" /></svg>
+        <span>tinyfoot</span>
+        <span class="pulse" id="pulse"></span>
+      </div>
+      <form id="search" role="search" autocomplete="off">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2" /><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" /></svg>
+        <input id="q" type="search" enterkeyhint="search" spellcheck="false" />
+        <ul id="results" role="listbox" hidden></ul>
+      </form>
+      <div id="clock" aria-live="off"></div>
+    </header>
+
+    <section id="layers" aria-label="Layers"></section>
+
+    <div id="explore" aria-label="Explore"></div>
+
+    <nav id="modes" role="tablist" aria-label="View mode"></nav>
+
+    <aside id="card" hidden>
+      <button id="card-close" type="button" aria-label="Close">×</button>
+      <div class="card-head">
+        <h2 id="card-title"></h2>
+        <span id="card-badge" class="badge"></span>
+      </div>
+      <p id="card-sub"></p>
+      <dl id="card-rows"></dl>
+      <button id="card-follow" type="button"></button>
+    </aside>
+
+    <button id="about-btn" type="button" aria-haspopup="dialog">i</button>
+    <dialog id="about">
+      <h2 id="about-title"></h2>
+      <p id="about-text"></p>
+      <label class="quality"><span id="quality-label"></span>
+        <select id="quality"></select>
+      </label>
+      <p class="credits">
+        Map © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> ·
+        <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> ·
+        <a href="https://mapterhorn.com/attribution" target="_blank" rel="noopener">Mapterhorn</a> ·
+        <a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol</a> ·
+        <a href="https://www.adsbdb.com" target="_blank" rel="noopener">adsbdb</a> ·
+        <a href="https://celestrak.org" target="_blank" rel="noopener">CelesTrak</a> ·
+        <a href="https://www.digitraffic.fi/en/" target="_blank" rel="noopener">Fintraffic</a> ·
+        <a href="https://github.com/LuSrodri/tinyfoot" target="_blank" rel="noopener">GitHub</a>
+      </p>
+      <form method="dialog"><button id="about-close"></button></form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
