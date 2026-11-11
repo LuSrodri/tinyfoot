@@ -25,7 +25,8 @@ export function loadMeshCache(): Promise<void> {
       open.onerror = () => resolve();
       open.onsuccess = () => {
         db = open.result;
-        const cursor = db.transaction(STORE).objectStore(STORE).openCursor();
+        // Read-write, so that meshes made by an older version can be dropped on the way.
+        const cursor = db.transaction(STORE, 'readwrite').objectStore(STORE).openCursor();
         cursor.onerror = () => resolve();
         cursor.onsuccess = () => {
           const c = cursor.result;
