@@ -45,8 +45,13 @@ const num = (v: string | null, min: number, max: number): number | null => {
   return Number.isFinite(n) && n >= min && n <= max ? n : null;
 };
 
+/** Why each upstream failed on the last attempt, reported in the 502 so outages can be told apart. */
+let lastFailures: string[] = [];
+
 async function fetchUpstream(up: Upstream): Promise<Response | null> {
+  lastFailures = [];
   for (const url of up.urls) {
+    const host = new URL(url).host;
     try {
       const headers = new Headers(up.init?.headers);
       if (!headers.has('user-agent')) headers.set('user-agent', UA);
@@ -55,8 +60,10 @@ async function fetchUpstream(up: Upstream): Promise<Response | null> {
       if (up.cacheMiss && res.status >= 400 && res.status < 500 && res.status !== 429) {
         return new Response('', { status: 200 });
       }
-    } catch {
+      lastFailures.push(`${host}: ${res.status}`);
+    } catch (err) {
       // try the next mirror
+      lastFailures.push(`${host}: ${err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : 'network'}`);
     }
   }
   return null;
@@ -75,7 +82,7 @@ async function cached(key: string, up: Upstream, ctx: ExecutionContext): Promise
   const fresh = await fetchUpstream(up);
   if (!fresh) {
     if (hit) return withClientHeaders(hit, Math.min(up.ttl, 10), 'stale');
-    return json({ error: 'upstream_unavailable' }, 502);
+    return json({ error: 'upstream_unavailable', tried: lastFailures }, 502);
   }
   const body = await fresh.arrayBuffer();
   const type = up.type ?? fresh.headers.get('content-type') ?? 'application/octet-stream';
@@ -113,12 +120,13 @@ function aircraft(q: URLSearchParams): [string, Upstream] | null {
     {
       // Whole-planet views poll many regions at once and can live with slightly older data.
       ttl: q.get('far') ? 12 : 4,
-      // Live positions go stale fast: move on to the next receiver network rather than wait.
-      timeout: 4500,
+      // adsb.fi answers in well under a second when it accepts the request (it may refuse
+      // requests from shared cloud addresses); adsb.lol can take over ten seconds when busy.
+      timeout: 15000,
       type: 'application/json',
       urls: [
-        `https://api.adsb.lol/v2/point/${la}/${lo}/250`,
         `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/250`,
+        `https://api.adsb.lol/v2/point/${la}/${lo}/250`,
       ],
     },
   ];
