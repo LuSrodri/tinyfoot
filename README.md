@@ -27,6 +27,7 @@ A photorealistic 3D world seen through a tilt-shift lens, from orbit (macro) dow
 - Traffic and pedestrians are **not** real vehicles or people. They are agents at real size on the real streets, with density and speed estimated from local time, weekday and street class. Cars are drawn from each region's best-selling models, each generated to that model's real length, width, height and body type.
 - All moving models (aircraft, ships, trains, buses, cars, people) are generated in code from real dimensions and cached in the browser. They have the right proportions and layout for their type, not every detail of the real thing.
 - The photorealistic city is Google's photogrammetry: real, but captured months or years ago. Cars baked into it are not live.
+- Night falls with the real sun where you look (or always, in Night mode). The photographs were taken by day, so at night the lit windows, street lamps along the OpenStreetMap streets and the light of headlights are **illustrative**, not a record of which lights are on. From orbit, the night side shows NASA's Black Marble city lights.
 - River markers from Open-Meteo Flood are a hydrological model; USGS and ANA markers are measured levels. SAISP has no open API, so São Paulo flooding comes from CGE's public page (counts, no coordinates).
 
 ## Controls
@@ -34,7 +35,7 @@ A photorealistic 3D world seen through a tilt-shift lens, from orbit (macro) dow
 No interface by default. Drag to move, scroll to zoom, right-drag or Ctrl-drag to tilt and turn. Click an aircraft, ship, vehicle, satellite or river gauge for details.
 
 - **G** shows or hides the interface (layers, search, places, view modes).
-- **M** steps through the view modes: Miniature (tilt-shift), Photo, Night.
+- **M** steps through the view modes: Miniature (tilt-shift), Photo (no tilt-shift), Night (tilt-shift, always night).
 - `?q=low|medium|high` forces a quality level.
 
 ## How it works
@@ -46,7 +47,8 @@ browser ── CesiumJS: Google 3D tiles (city) / NASA GIBS globe (orbit), tilt-
 ```
 
 - The camera uses a narrow 22° field of view and stands far back, so the city reads almost isometric, like a model railway.
-- Tilt-shift, the miniature colour, the night look, rain, snow and fog are GPU post-processing passes.
+- Tilt-shift, the miniature colour, rain, snow and fog are GPU post-processing passes. Night is a custom shader on the city tiles themselves (darkened, with windows on a 3.2 m floor grid on every wall), drawn before the moving models so their lights stay bright.
+- Aircraft on the ground stand on the measured photographed runway, not on the terrain model, which can be metres off at airports.
 - Every moving thing is placed on the WGS84 ellipsoid in double precision on the CPU, relative to a point near the camera, and drawn with instancing, depth-tested against the 3D tiles.
 - Ground heights come from Cesium World Terrain and are calibrated against the photographed surface on open road.
 - The Worker (`worker/index.ts`) does no parsing: bytes in, bytes out, with an edge cache per feed so that all viewers share one upstream request.

@@ -113,6 +113,8 @@ function aircraft(q: URLSearchParams): [string, Upstream] | null {
     {
       // Whole-planet views poll many regions at once and can live with slightly older data.
       ttl: q.get('far') ? 12 : 4,
+      // Live positions go stale fast: move on to the next receiver network rather than wait.
+      timeout: 4500,
       type: 'application/json',
       urls: [
         `https://api.adsb.lol/v2/point/${la}/${lo}/250`,

@@ -116,6 +116,7 @@ async function main(): Promise<void> {
     selection: null,
     caps: { ais: false, sptrans: false },
     elevAt: (lat, lon) => base.elevAt(lat, lon),
+    surfaceAt: (lat, lon) => base.surfaceAt(lat, lon),
   };
   void getJson<{ ais: boolean; sptrans: boolean }>('/api/health').then((h) => {
     if (h) ctx.caps = { ais: Boolean(h.ais), sptrans: Boolean(h.sptrans) };
@@ -193,7 +194,8 @@ async function main(): Promise<void> {
   });
 
   // ------------------------------------------------------------- 3D layer
-  const nightAt = (lat: number, lon: number, now: number): number => Math.max(0, Math.min(1, (2 - sunElevation(lat, lon, now)) / 10));
+  // The same night as the city: the real sun where you look, or always in Night mode.
+  const nightAt = (): number => base.nightLevel;
   const layer3d = new InstancedLayer(
     buildMeshes(),
     (scene: Scene, frame: FrameInfo) => {
@@ -294,6 +296,7 @@ async function main(): Promise<void> {
     b.textContent = t(modeLabel[m]);
     b.addEventListener('click', () => {
       void base.setMode(m).then(() => {
+        base.updateLight(Date.now());
         store.set('mode', m);
         applyModeClass();
         updateBlur();

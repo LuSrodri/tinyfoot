@@ -6,7 +6,8 @@
 //   0 body (instance colour 1)   1 accent (instance colour 2)   2 dark
 //   3 light grey                 4 glass (glows at night)       5 skin
 //   6 shadow (translucent)       7 trail (instance colour 2, translucent)
-//   8 belly / engines (instance colour 3)
+//   8 belly / engines (instance colour 3)  9 lamp (glows at night)
+//  10 light pool (instance colour 1, additive, fades out from the centre, only at night)
 
 type V3 = [number, number, number];
 
@@ -743,6 +744,19 @@ function shadow(): MeshDef {
   return b.build(1, true);
 }
 
+/** A pool of light on the ground (street lamp, headlights): a disc that fades from its centre. */
+function glow(): MeshDef {
+  const b = new Builder();
+  const n = 20;
+  const ring = (r: number, a: number): V3 => [Math.cos(a) * r, Math.sin(a) * r, 0];
+  for (let i = 0; i < n; i++) {
+    const a0 = (i / n) * Math.PI * 2, a1 = ((i + 1) / n) * Math.PI * 2;
+    b.tri([0, 0, 0], ring(0.2, a0), ring(0.2, a1), 10, [0, 0, -1]);
+    b.quad(ring(0.2, a0), ring(0.5, a0), ring(0.5, a1), ring(0.2, a1), 10, [0, 0, -1]);
+  }
+  return b.build(1, true);
+}
+
 function segment(): MeshDef {
   const b = new Builder();
   b.box(-0.5, 0, -0.5, 0.5, 1, 0.5, 7);
@@ -771,6 +785,7 @@ export enum M {
   Deck,
   Pier,
   Tanker,
+  Glow,
 }
 
 /** Built in the same order as the `M` enum. */
@@ -797,6 +812,7 @@ export function buildMeshes(): MeshDef[] {
     deck(),
     pier(),
     tanker(),
+    glow(),
   ];
 }
 

@@ -205,6 +205,13 @@ void main() {
   else if (part == 7) { c = i_c2; a = 0.85; light = 1.0; }
   else if (part == 8) c = i_c3;
   else if (part == 9) { c = vec3(1.0, 0.96, 0.84); glow = u_night; }
+  if (part == 10) {
+    // Light thrown on the ground: added on top of what is there, strongest at the centre.
+    float k = max(0.0, 1.0 - 2.0 * length(a_pos.xy));
+    float s = u_night * k * k * 0.75;
+    v_color = vec4(i_c1 * s, s * 0.2);
+    return;
+  }
   vec3 rgb = c * mix(light, 1.25, glow);
   v_color = vec4(rgb * a, a);
 }`;
@@ -244,6 +251,7 @@ export class InstancedLayer {
   constructor(
     private readonly meshes: MeshDef[],
     private readonly onFrame: (scene: Scene, frame: FrameInfo) => void,
+    /** 0 = day, 1 = night where the camera looks (or always, in Night mode). */
     private readonly nightAt: (lat: number, lon: number, now: number) => number,
     private readonly view: () => ViewState,
   ) {

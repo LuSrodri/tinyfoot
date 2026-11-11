@@ -66,6 +66,8 @@ export interface Ctx {
   tier: Tier;
   /** Ground elevation in metres at a place (0 when terrain is off or not loaded). */
   elevAt(lat: number, lon: number): number;
+  /** Height of the photographed surface itself (runway, deck, roof), where its tiles are loaded. */
+  surfaceAt(lat: number, lon: number): number | undefined;
   selection: Selection | null;
   lang: 'pt' | 'en';
   /** Server capabilities reported by /api/health. */

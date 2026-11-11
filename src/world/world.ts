@@ -9,10 +9,12 @@ import {
   BoundingSphere,
   Cartesian2,
   Cartesian3,
+  Cartesian4,
   Cartographic,
   CesiumTerrainProvider,
   CesiumWidget,
   Color,
+  CustomShader,
   Ellipsoid,
   Globe,
   HeadingPitchRange,
@@ -23,6 +25,7 @@ import {
   JulianDate,
   LabelCollection,
   LabelStyle,
+  LightingModel,
   Math as CMath,
   Matrix4,
   NearFarScalar,
@@ -35,6 +38,8 @@ import {
   SceneTransforms,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
+  Transforms,
+  UniformType,
   UrlTemplateImageryProvider,
   VerticalOrigin,
   createGooglePhotorealistic3DTileset,
@@ -126,11 +131,10 @@ const GIBS = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best';
 
 // ---------------------------------------------------------------------- post-processing
 
-/** Miniature colour: livelier saturation and contrast, a gentle vignette, and the night look. */
+/** Miniature colour: livelier saturation and contrast and a gentle vignette. */
 const STYLE_FS = `
 uniform sampler2D colorTexture;
 uniform float u_amount;
-uniform float u_night;
 in vec2 v_textureCoordinates;
 void main() {
   vec3 c = texture(colorTexture, v_textureCoordinates).rgb;
@@ -142,12 +146,61 @@ void main() {
   float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
   c = mix(vec3(l), c, 1.0 + 0.38 * u_amount);
   c = (c - 0.5) * (1.0 + 0.1 * u_amount) + 0.5 + 0.015 * u_amount;
-  // Night: the photographs were taken by day, so dim them, shift to blue and lift the lights.
-  vec3 night = c * vec3(0.26, 0.3, 0.45) + pow(max(c - 0.82, 0.0), vec3(2.0)) * vec3(3.0, 2.4, 1.4);
-  c = mix(c, night, u_night);
   vec2 d = v_textureCoordinates - 0.5;
   c *= 1.0 - dot(d, d) * 0.5 * u_amount;
   out_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+}`;
+
+/**
+ * Night on the photographed city. The photographs were taken by day, so most of their light is
+ * taken away, the lower facades get the warm spill of street lamps, and walls get lit windows:
+ * a floor every 3.2 m and a window every 2.9 m, counted from a fixed point on the ground, some
+ * lit, most dark, shop fronts more often lit. Runs before our own models are drawn, so their
+ * headlights and cabin windows stay bright.
+ */
+const CITY_NIGHT_FS = `
+float tfHash(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
+  if (u_night < 0.002) return;
+  vec3 c = material.diffuse;
+  vec3 pos = fsInput.attributes.positionEC;
+  vec3 rel = pos - u_anchor;
+  float h = dot(rel, u_up);
+  vec3 n = normalize(cross(dFdx(pos), dFdy(pos)));
+  float upness = abs(dot(n, u_up));
+  vec3 dark = c * vec3(0.03, 0.037, 0.075);
+  // Street lamps spill warm light on the lower facades; the ground gets its pools from the lamps themselves.
+  dark += c * vec3(0.2, 0.13, 0.065) * exp(-max(h, 0.0) / 7.0) * (1.0 - upness);
+  vec3 glow = vec3(0.0);
+  bool leafy = c.g > c.r * 1.05 && c.g > c.b * 1.05;
+  if (upness < 0.35 && h > 0.0 && h < 450.0 && !leafy) {
+    // Walls of one building share an orientation: snap it (15° steps) so the window grid holds across the
+    // small bumps of the photogrammetry mesh.
+    float az = atan(dot(n, u_north), dot(n, u_east));
+    float q = 0.2617994;
+    float azq = floor(az / q + 0.5) * q;
+    vec3 t = -sin(azq) * u_east + cos(azq) * u_north;
+    vec2 g = vec2(dot(rel, t) / 2.9, h / 3.2);
+    vec2 cell = floor(g);
+    vec2 f = fract(g);
+    float r = tfHash(vec3(cell, azq * 11.0));
+    float shop = 1.0 - step(0.5, cell.y);
+    vec2 lo = mix(vec2(0.2, 0.3), vec2(0.06, 0.05), shop);
+    vec2 hi = mix(vec2(0.8, 0.78), vec2(0.94, 0.8), shop);
+    vec2 w = fwidth(g);
+    vec2 inside = smoothstep(lo - w, lo + w, f) * (1.0 - smoothstep(hi - w, hi + w, f));
+    float lit = step(r, mix(0.3, 0.5, shop));
+    vec3 tint = mix(vec3(1.0, 0.62, 0.28), vec3(0.75, 0.82, 1.0), step(0.75, fract(r * 13.7)));
+    vec3 near = tint * (0.35 + 0.5 * fract(r * 7.3)) * inside.x * inside.y * lit;
+    // Far away a window is smaller than a pixel: use the average glow instead of shimmering.
+    float detail = clamp(1.5 - max(w.x, w.y) * 3.0, 0.0, 1.0);
+    glow = mix(vec3(1.0, 0.7, 0.4) * 0.05, near, detail);
+  }
+  material.diffuse = mix(c, dark + glow, u_night);
 }`;
 
 /** One direction of the tilt-shift blur: sharp across a band, increasingly soft above and below it. */
@@ -262,6 +315,28 @@ class Heights {
     const h = (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
     this.last = h;
     return h + this.offset;
+  }
+
+  /** Whether the ground around a point has been measured yet. */
+  known(lat: number, lon: number): boolean {
+    const i = Math.floor(lat * Heights.RES), j = Math.floor(lon * Heights.RES);
+    return [this.key(i, j), this.key(i, j + 1), this.key(i + 1, j), this.key(i + 1, j + 1)].every((k) => this.cells.has(k));
+  }
+
+  /** The ground height at one point, measured now if it is not known yet (null if unavailable). */
+  async ground(lat: number, lon: number): Promise<number | null> {
+    if (this.known(lat, lon)) return this.get(lat, lon);
+    for (let n = 0; !this.provider && n < 40; n++) await new Promise((r) => setTimeout(r, 100));
+    if (!this.provider) return null;
+    try {
+      const [c] = await sampleTerrainMostDetailed(this.provider, [Cartographic.fromDegrees(lon, lat)]);
+      if (!Number.isFinite(c.height)) return null;
+      // Also the best guess for nearby points until their grid cells arrive.
+      this.last = c.height;
+      return c.height + this.offset;
+    } catch {
+      return null;
+    }
   }
 
   private async pump(): Promise<void> {
@@ -412,7 +487,19 @@ export class World implements WorldMap {
   private blurV!: PostProcessStage;
   private weatherStage!: PostProcessStage;
   private weather: Weather | null = null;
-  private night = 0;
+  /** 0 = day, 1 = night where the camera looks (always 1 in Night mode). */
+  nightLevel = 0;
+  private readonly cityNight = new CustomShader({
+    lightingModel: LightingModel.UNLIT,
+    uniforms: {
+      u_night: { type: UniformType.FLOAT, value: 0 },
+      u_anchor: { type: UniformType.VEC3, value: new Cartesian3() },
+      u_east: { type: UniformType.VEC3, value: new Cartesian3() },
+      u_north: { type: UniformType.VEC3, value: new Cartesian3() },
+      u_up: { type: UniformType.VEC3, value: new Cartesian3() },
+    },
+    fragmentShaderText: CITY_NIGHT_FS,
+  });
   private listeners = new Map<string, ((e: MapEvent) => void)[]>();
   private frame = -1;
   private cached = { lat: 0, lng: 0, h: 0, range: 1000, mpp: 1, zoom: 2, globe: true };
@@ -424,7 +511,11 @@ export class World implements WorldMap {
     this.mode = mode;
     const globe = new Globe(Ellipsoid.WGS84);
     globe.enableLighting = true;
-    globe.showGroundAtmosphere = true;
+    // The ground atmosphere would black out the night side and hide the city lights.
+    globe.showGroundAtmosphere = false;
+    // City lights at every distance, not only from far away.
+    globe.nightFadeOutDistance = 1;
+    globe.nightFadeInDistance = 2;
     globe.baseColor = Color.fromCssColorString('#0b1a2b');
     this.widget = new CesiumWidget(container, {
       globe,
@@ -447,9 +538,19 @@ export class World implements WorldMap {
     scene.highDynamicRange = false;
     scene.postProcessStages.fxaa.enabled = tier.quality !== 'low';
     // Latest measured precipitation from space, over the globe.
-    globe.imageryLayers.addImageryProvider(
+    const rain = globe.imageryLayers.addImageryProvider(
       new UrlTemplateImageryProvider({ url: `${GIBS}/IMERG_Precipitation_Rate/default/default/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png`, maximumLevel: 6, credit: 'NASA GIBS / IMERG' }),
-    ).alpha = 0.45;
+    );
+    rain.alpha = 0.45;
+    // Fainter over the night side, where it would cover the city lights.
+    rain.nightAlpha = 0.45;
+    // City lights on the night side of the planet (NASA Black Marble), under the rain.
+    const lights = globe.imageryLayers.addImageryProvider(
+      new UrlTemplateImageryProvider({ url: `${GIBS}/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png`, maximumLevel: 8, credit: 'NASA GIBS / Black Marble' }),
+      1,
+    );
+    lights.dayAlpha = 0;
+    lights.nightAlpha = 1;
     // Real time, so the sun, and day and night on the globe, are where they are now.
     this.widget.clock.currentTime = JulianDate.now();
     this.widget.clock.multiplier = 1;
@@ -472,12 +573,17 @@ export class World implements WorldMap {
     w.wireEvents();
     try {
       const tiles = await createGooglePhotorealistic3DTileset({ onlyUsingWithGoogleGeocoder: true }, { maximumScreenSpaceError: w.sse(), showCreditsOnScreen: true });
+      tiles.customShader = w.cityNight;
       w.tiles = tiles;
       w.widget.scene.primitives.add(tiles);
     } catch (err) {
       console.error('[tinyfoot] photorealistic tiles', err);
     }
-    w.widget.scene.preRender.addEventListener(() => w.switchScale());
+    window.setInterval(() => w.measureSurface(), 300);
+    w.widget.scene.preRender.addEventListener(() => {
+      w.switchScale();
+      w.updateCityNight();
+    });
     w.applyMode();
     return w;
   }
@@ -514,9 +620,9 @@ export class World implements WorldMap {
 
   private setupStages(): void {
     const stages = this.widget.scene.postProcessStages;
-    this.style = new PostProcessStage({ fragmentShader: STYLE_FS, uniforms: { u_amount: () => (this.mode === 'mini' ? 1 : 0.35), u_night: () => this.night } });
+    this.style = new PostProcessStage({ fragmentShader: STYLE_FS, uniforms: { u_amount: () => (this.mode === 'photo' ? 0.35 : 1) } });
     const strength = () => {
-      if (this.mode !== 'mini') return 0;
+      if (this.mode === 'photo') return 0;
       // A real tilt-shift lens blurs more the further out the scene; ease it off at globe scale.
       const z = this.view().zoom;
       return Math.max(0, Math.min(1, (z - 9) / 5)) * (this.tier.quality === 'low' ? 4 : 6);
@@ -549,7 +655,8 @@ export class World implements WorldMap {
   }
 
   private applyMode(): void {
-    this.blurH.enabled = this.blurV.enabled = this.mode === 'mini';
+    // Tilt-shift is part of the miniature look by day and by night; Photo mode shows the plain view.
+    this.blurH.enabled = this.blurV.enabled = this.mode !== 'photo';
   }
 
   async setMode(mode: Mode): Promise<void> {
@@ -562,9 +669,35 @@ export class World implements WorldMap {
     const v = this.view();
     const sun = sunElevation(v.lat, v.lng, now);
     const natural = Math.max(0, Math.min(1, (2 - sun) / 10));
-    this.night = this.mode === 'night' ? 1 : natural * 0.85;
+    this.nightLevel = this.mode === 'night' ? 1 : natural;
     void solarHour;
   }
+
+  /** Feeds the city's night shader a fixed point on the ground and its east/north/up axes, in eye space. */
+  private updateCityNight(): void {
+    const sh = this.cityNight;
+    sh.setUniform('u_night', this.tiles?.show ? this.nightLevel : 0);
+    if (this.nightLevel < 0.002 || !this.tiles?.show) return;
+    const v = this.view();
+    // Snapped, so the windows stay put while the view pans (they shift once every kilometre or so).
+    const lat = Math.round(v.lat * 100) / 100;
+    const lon = Math.round(v.lng * 100) / 100;
+    const p = Cartesian3.fromDegrees(lon, lat, this.elevAt(lat, lon), undefined, this.tmpP);
+    const enu = Transforms.eastNorthUpToFixedFrame(p, undefined, this.tmpM);
+    const view = this.widget.scene.camera.viewMatrix;
+    const axis = (col: number, out: Cartesian3) => {
+      Matrix4.getColumn(enu, col, this.tmp4);
+      Cartesian3.fromElements(this.tmp4.x, this.tmp4.y, this.tmp4.z, out);
+      return Cartesian3.normalize(Matrix4.multiplyByPointAsVector(view, out, out), out);
+    };
+    sh.setUniform('u_anchor', Matrix4.multiplyByPoint(view, p, new Cartesian3()));
+    sh.setUniform('u_east', axis(0, new Cartesian3()));
+    sh.setUniform('u_north', axis(1, new Cartesian3()));
+    sh.setUniform('u_up', axis(2, new Cartesian3()));
+  }
+  private readonly tmpP = new Cartesian3();
+  private readonly tmpM = new Matrix4();
+  private readonly tmp4 = new Cartesian4();
 
   setWeather(w: Weather | null): void {
     this.weather = w;
@@ -613,6 +746,37 @@ export class World implements WorldMap {
     return this.heights.get(lat, lon);
   }
 
+  /**
+   * Height of the photographed surface at a point, from the last measurement within about ten metres. Measuring renders the scene, so it cannot happen while a frame is being drawn: the point
+   * is queued and measured between frames.
+   */
+  surfaceAt(lat: number, lon: number): number | undefined {
+    const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+    const known = this.surface.get(key);
+    if (known === undefined && this.surfaceQueue.size < 32) this.surfaceQueue.set(key, [lat, lon]);
+    return known === null ? undefined : known;
+  }
+  private surface = new Map<string, number | null>();
+  private surfaceQueue = new Map<string, [number, number]>();
+
+  private measureSurface(): void {
+    const scene = this.widget.scene;
+    if (!this.surfaceQueue.size || !scene.sampleHeightSupported || !this.tiles?.show) return;
+    let n = 4;
+    for (const [key, [lat, lon]] of this.surfaceQueue) {
+      if (n-- <= 0) break;
+      this.surfaceQueue.delete(key);
+      let h: number | undefined;
+      try {
+        h = scene.sampleHeight(Cartographic.fromDegrees(lon, lat), this.exclude, 1);
+      } catch {
+        h = undefined;
+      }
+      this.surface.set(key, h !== undefined && Number.isFinite(h) ? h : null);
+    }
+    if (this.surface.size > 4000) this.surface.clear();
+  }
+
   // ------------------------------------------------------------------ view
 
   /** Where the camera looks, refreshed once per rendered frame. */
@@ -623,10 +787,17 @@ export class World implements WorldMap {
     this.frame = f;
     const camera = scene.camera;
     const canvas = scene.canvas;
-    const h0 = this.cached.h;
-    const e = new Ellipsoid(6378137 + h0, 6378137 + h0, 6356752.3142 + h0);
+    // Where the line of sight meets the ground: first against the ground height last seen, then
+    // once more against the height found there, which matters after a jump to a new place.
     const ray = new Ray(camera.positionWC, camera.directionWC);
-    const hit = rayEllipsoid(ray, e);
+    const at = (h0: number) => rayEllipsoid(ray, new Ellipsoid(6378137 + h0, 6378137 + h0, 6356752.3142 + h0));
+    const h0 = this.cached.h;
+    let hit = at(h0);
+    if (hit && camera.positionCartographic.height < 400000) {
+      const c0 = Cartographic.fromCartesian(hit);
+      const h1 = this.heights.get(c0.latitude / DEG, c0.longitude / DEG);
+      if (Math.abs(h1 - h0) > 3) hit = at(h1) ?? hit;
+    }
     let lat: number, lng: number, range: number;
     if (hit) {
       const c = Cartographic.fromCartesian(hit);
@@ -757,29 +928,47 @@ export class World implements WorldMap {
     return (mpp * w) / 2 / Math.tan(fovx / 2);
   }
 
-  private target(o: CameraOptions): { sphere: BoundingSphere; offset: HeadingPitchRange } {
+  private target(o: CameraOptions, groundAt?: number): { sphere: BoundingSphere; offset: HeadingPitchRange; lat: number; lng: number; ground: number } {
     const v = this.view();
     const camera = this.widget.scene.camera;
     const [lng, lat] = o.center ?? [v.lng, v.lat];
     const zoom = o.zoom ?? v.zoom;
     const pitch = o.pitch ?? this.getPitch();
     const heading = o.bearing !== undefined ? o.bearing * DEG : camera.heading;
-    const ground = this.elevAt(lat, lng);
+    const ground = groundAt ?? this.elevAt(lat, lng);
     const range = o.zoom !== undefined || o.center === undefined ? this.rangeFor(zoom, lat) : v.range;
     // Near the globe scale look straight down; below it keep the requested tilt.
     const p = zoom < 6 ? 0 : Math.max(0, Math.min(75, pitch));
     return {
       sphere: new BoundingSphere(Cartesian3.fromDegrees(lng, lat, ground), 0),
       offset: new HeadingPitchRange(heading, -(90 - p) * DEG, range),
+      lat,
+      lng,
+      ground,
     };
   }
 
+  /** Bumped by every camera move, so a late ground measurement does not disturb a newer one. */
+  private moveSeq = 0;
+
   jumpTo(o: CameraOptions): void {
     const camera = this.widget.scene.camera;
-    const { sphere, offset } = this.target(o);
+    const { sphere, offset, lat, lng, ground } = this.target(o);
     camera.lookAt(sphere.center, offset);
     camera.lookAtTransform(Matrix4.IDENTITY);
     this.frame = -1;
+    // Before the ground there has been measured the camera is placed as if at sea level, which is
+    // hundreds of metres off in a city like São Paulo. Lift it once the real ground is known.
+    if (o.center && !this.heights.known(lat, lng)) {
+      const seq = ++this.moveSeq;
+      void this.heights.ground(lat, lng).then((g) => {
+        if (g === null || seq !== this.moveSeq || Math.abs(g - ground) < 2) return;
+        const up = Ellipsoid.WGS84.geodeticSurfaceNormal(camera.positionWC, new Cartesian3());
+        camera.move(up, g - ground);
+        this.frame = -1;
+        this.emit('moveend', { point: { x: 0, y: 0 }, lngLat: { lng, lat } });
+      });
+    }
   }
 
   easeTo(o: CameraOptions): void {
@@ -787,10 +976,17 @@ export class World implements WorldMap {
   }
 
   flyTo(o: CameraOptions & { speed?: number; curve?: number; essential?: boolean }): void {
-    const { sphere, offset } = this.target(o);
-    const camera = this.widget.scene.camera;
-    camera.flyToBoundingSphere(sphere, { offset, duration: (o.duration ?? 2600) / 1000 });
-    this.frame = -1;
+    const seq = ++this.moveSeq;
+    const go = (groundAt?: number) => {
+      if (seq !== this.moveSeq) return;
+      const { sphere, offset } = this.target(o, groundAt);
+      this.widget.scene.camera.flyToBoundingSphere(sphere, { offset, duration: (o.duration ?? 2600) / 1000 });
+      this.frame = -1;
+    };
+    const [lng, lat] = o.center ?? [NaN, NaN];
+    if (!o.center || this.heights.known(lat, lng)) return go();
+    // Measure the ground at the destination first (a fraction of a second) so the flight ends at the right height.
+    void this.heights.ground(lat, lng).then((g) => go(g ?? undefined));
   }
 
   fitBounds(b: [[number, number], [number, number]], o: { maxZoom?: number; pitch?: number; duration?: number } = {}): void {

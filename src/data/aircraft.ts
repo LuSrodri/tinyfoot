@@ -86,6 +86,8 @@ class Plane {
   seen = 0;
   groundElev = 0;
   groundElevAt = 0;
+  /** Photographed runway minus the terrain model, last measured under this aircraft. */
+  surfaceDelta = 0;
   /** Recent positions: mercator x, y, altitude. */
   trail: number[] = [];
   route?: RouteInfo | null;
@@ -178,14 +180,17 @@ export class AircraftLayer implements Layer {
     this.lastStart = now;
     this.inflight++;
     const far = this.cells.size > 4 ? "&far=1" : "";
-    void getJson<{ ac?: RawAc[]; now?: number }>(`/api/aircraft?lat=${due.lat}&lon=${due.lon}${far}`, 20000)
+    // adsb.lol answers { ac, now: ms }, adsb.fi { aircraft, now: s }.
+    void getJson<{ ac?: RawAc[]; aircraft?: RawAc[]; now?: number }>(`/api/aircraft?lat=${due.lat}&lon=${due.lon}${far}`, 20000)
       .then((data) => {
-        if (!data?.ac) {
+        const list = data?.ac ?? data?.aircraft;
+        if (!list) {
           this.failures++;
           return;
         }
         this.failures = 0;
-        this.ingest(data.ac, data.now);
+        const now = data?.now;
+        this.ingest(list, now !== undefined && now < 1e11 ? now * 1000 : now);
       })
       .finally(() => {
         this.inflight--;
@@ -203,7 +208,8 @@ export class AircraftLayer implements Layer {
         this.planes.set(a.hex, p);
       }
       const fixT = base - (a.seen_pos ?? 0) * 1000;
-      const flight = (a.flight ?? '').trim();
+      // Some transponders send '@' padding instead of a callsign.
+      const flight = (a.flight ?? '').replace(/[^A-Za-z0-9-]/g, '').trim();
       if (flight !== p.flight || (a.t ?? '') !== p.type) {
         p.flight = flight;
         p.type = a.t ?? '';
@@ -281,7 +287,15 @@ export class AircraftLayer implements Layer {
       if (nearGround && frame.zoom > 8) {
         if (frame.now - p.groundElevAt > 1500) {
           p.groundElevAt = frame.now + Math.random() * 400;
-          p.groundElev = ctx.elevAt(m.lat, m.lon);
+          let g = ctx.elevAt(m.lat, m.lon);
+          // The terrain model can be metres off the photographed runway: stand on what is drawn.
+          // Measurements come in a little later, so keep the last difference while the aircraft rolls on.
+          if (p.ground && frame.zoom > 12.5) {
+            const s = ctx.surfaceAt(m.lat, m.lon);
+            if (s !== undefined && s > g - 15 && s < g + 8) p.surfaceDelta = s - g;
+            g += p.surfaceDelta;
+          }
+          p.groundElev = g;
         }
         // Wheels on the tarmac; never let a low approach sink into a hill.
         const gear = len * 0.085 * size;
@@ -339,7 +353,8 @@ export class AircraftLayer implements Layer {
       layer: this.id,
       id: p.hex,
       badge: t('live'),
-      zoom: 11,
+      // Close enough to see the aircraft itself while it taxis; a wider view of its flight in the air.
+      zoom: p.ground ? 17.5 : 12,
       title: () => p.flight || p.reg || p.hex.toUpperCase(),
       subtitle: () => {
         const model = p.airframe?.type ? `${p.airframe.manufacturer ?? ''} ${p.airframe.type}`.trim() : p.info.name || p.type || t('unknownType');

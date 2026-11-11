@@ -52,6 +52,8 @@ interface Road {
   baseZ: number;
   /** Piers as [mercX, mercY, groundZ, heading] quads; built lazily. */
   piers: Float64Array | null;
+  /** Street lamps as [mercX, mercY, metres along] triples; built lazily. */
+  lamps: Float64Array | null;
 }
 
 const smooth = (v: number): number => {
@@ -252,7 +254,7 @@ export class RoadNet {
         if (len < 3) continue;
         const startNode = String(part[0].id);
         const endNode = String(part[n - 1].id);
-        roads.push({ key: `${w.id}:${startNode}:${endNode}`, x, y, cum, len, cls, oneway, startNode, endNode, lift, rampA: true, rampB: true, baseZ: NaN, piers: null });
+        roads.push({ key: `${w.id}:${startNode}:${endNode}`, x, y, cum, len, cls, oneway, startNode, endNode, lift, rampA: true, rampB: true, baseZ: NaN, piers: null, lamps: null });
       }
     }
     const nodes = new Map<string, number[]>();
@@ -575,6 +577,7 @@ export class TrafficLayer extends Agents {
   override emit(scene: Scene, frame: FrameInfo): void {
     super.emit(scene, frame);
     if (!this.enabled || frame.zoom < this.minZoom) return;
+    if (frame.night > 0.02) this.streetLights(scene, frame);
     let budget = 900;
     for (const r of this.net.roads) {
       if (!r.lift || r.cls === Cls.Path) continue;
@@ -608,6 +611,50 @@ export class TrafficLayer extends Agents {
       }
     }
   }
+  /** Where the street lamps of a road stand: alternating sides, closer together on main roads. */
+  private lampsOf(r: Road): Float64Array {
+    if (r.lamps) return r.lamps;
+    const spacing = r.cls <= Cls.Secondary ? 30 : r.cls === Cls.Path ? 28 : r.cls === Cls.Service ? 45 : 36;
+    const off = HALF_WIDTH[r.cls] + 0.6;
+    const list: number[] = [];
+    const n = r.x.length;
+    let k = 0;
+    let side = 1;
+    for (let s = spacing / 2; s < r.len; s += spacing, side = -side) {
+      while (k < n - 2 && r.cum[k + 1] < s) k++;
+      const f = (s - r.cum[k]) / Math.max(1e-6, r.cum[k + 1] - r.cum[k]);
+      const dx = r.x[k + 1] - r.x[k];
+      const dy = r.y[k + 1] - r.y[k];
+      const py = r.y[k] + dy * f;
+      const h = Math.atan2(dx, -dy);
+      const o = off * side * mercScale(py);
+      list.push(r.x[k] + dx * f + Math.cos(h) * o, py + Math.sin(h) * o, s);
+    }
+    r.lamps = new Float64Array(list);
+    return r.lamps;
+  }
+
+  /** At night, the warm pools of the street lamps along every street in view. */
+  private streetLights(scene: Scene, frame: FrameInfo): void {
+    const c = this.ctx.map.getCenter();
+    const cx = mercX(c.lng);
+    const cy = mercY(c.lat);
+    const reach = frame.mpp * this.ctx.map.getCanvas().clientWidth * 1.1 * mercScale(cy);
+    let budget = this.ctx.tier.quality === 'low' ? 900 : 2600;
+    for (const r of this.net.roads) {
+      const lamps = this.lampsOf(r);
+      const size = r.cls <= Cls.Secondary ? 17 : 13;
+      for (let k = 0; k < lamps.length && budget > 0; k += 3) {
+        const x = lamps[k];
+        const y = lamps[k + 1];
+        if (Math.abs(x - cx) > reach || Math.abs(y - cy) > reach) continue;
+        const z = r.lift ? bridgeZ(this.ctx, r, lamps[k + 2]) : this.ctx.elevAt(latOf(y), x * 360 - 180);
+        scene.add(M.Glow, x, y, z + 0.25, 0, size, size, 0, 0xffc477, 0);
+        budget--;
+      }
+    }
+  }
+
   protected perKm(cls: Cls): number {
     return CARS[cls];
   }
@@ -650,11 +697,18 @@ export class TrafficLayer extends Agents {
     }
     return ok;
   }
-  protected draw(scene: Scene, _frame: FrameInfo, i: number, mx: number, my: number, heading: number): void {
+  protected draw(scene: Scene, frame: FrameInfo, i: number, mx: number, my: number, heading: number): void {
     // Always real size: a four-metre car on a real-width street.
     const model = this.models[i];
-    if (!model) scene.add(M.Truck, mx, my, this.elev[i] + this.liftNow, heading, 1, 1, 0, this.color[i], 0xb3261e);
-    else scene.add(model.mesh, mx, my, this.elev[i] + this.liftNow, heading, model.sx, model.sy, 0, this.color[i], this.col2[i], this.col3[i]);
+    const z = this.elev[i] + this.liftNow;
+    if (!model) scene.add(M.Truck, mx, my, z, heading, 1, 1, 0, this.color[i], 0xb3261e);
+    else scene.add(model.mesh, mx, my, z, heading, model.sx, model.sy, 0, this.color[i], this.col2[i], this.col3[i]);
+    if (frame.night > 0.05) {
+      // Headlights on the road ahead.
+      const moto = model?.moto ?? false;
+      const ahead = (moto ? 4.5 : 7.5) * mercScale(my);
+      scene.add(M.Glow, mx + Math.sin(heading) * ahead, my - Math.cos(heading) * ahead, z + 0.15, heading, moto ? 2.6 : 4.4, moto ? 7 : 10, 0, 0xfff0d0, 0);
+    }
   }
 }
 

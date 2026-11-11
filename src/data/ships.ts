@@ -193,6 +193,11 @@ export class ShipLayer implements Layer {
       const my = mercY(m.lat);
       const sea = frame.zoom > 9 ? this.ctx.elevAt(m.lat, m.lon) : 0;
       scene.add(s.mesh, mx, my, sea, m.heading * DEG, scale, scale, 0, s.c1, s.c2, 0x7a2a22);
+      // At night the deck lights spill onto the water around the hull.
+      if (frame.night > 0.05 && size < 3) {
+        const len = s.length * size;
+        scene.add(M.Glow, mx, my, sea + 0.4, m.heading * DEG, len * 0.75, len * 1.5, 0, 0xffd9a8, 0);
+      }
       scene.pickable(mx, my, 6 * scale, Math.max(14, minPx * 0.8), s);
     }
   }

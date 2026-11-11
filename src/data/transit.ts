@@ -6,7 +6,7 @@ import { TRANSIT_FEEDS, type TransitFeed, type TransitMode } from '../../shared/
 import { inBounds, intersects, viewBounds, type Ctx, type InfoRow, type Layer, type LayerState, type Selection } from '../core';
 import type { FrameInfo, Scene } from '../gl/instanced';
 import { M } from '../gl/meshes';
-import { DEG, hash, haversine, hsl, mercX, mercY } from '../util/geo';
+import { DEG, hash, haversine, hsl, mercScale, mercX, mercY } from '../util/geo';
 import { Mover } from '../util/mover';
 import { t } from '../util/i18n';
 import { decodeVehiclePositions } from './gtfsrt';
@@ -337,6 +337,14 @@ export class TransitLayer implements Layer {
       const my = mercY(m.lat);
       scene.add(mesh, mx, my, v.elev, m.heading * DEG, scale, scale, 0, v.c1, v.c2, 0x3b4048);
       scene.pickable(mx, my, v.elev + 2 * scale, Math.max(13, minPx * 0.7), v);
+      if (frame.night > 0.05 && frame.zoom >= 15 && v.mode !== 'ferry') {
+        // Headlights on the track or road ahead, and the lit interior spilling out beside it.
+        const h = m.heading * DEG;
+        const ahead = (len * scale) / 2 + 6;
+        const k = mercScale(my);
+        scene.add(M.Glow, mx + Math.sin(h) * ahead * k, my - Math.cos(h) * ahead * k, v.elev + 0.2, h, 4.5, 12, 0, 0xfff0d0, 0);
+        scene.add(M.Glow, mx, my, v.elev + 0.2, h, 9, len * scale * 1.1, 0, 0xffe2b0, 0);
+      }
     }
   }
 
