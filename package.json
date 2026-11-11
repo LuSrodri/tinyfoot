@@ -15,8 +15,10 @@
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
-    "mapbox-gl": "^3.34.2",
+    "@mapbox/vector-tile": "^3.0.0",
+    "cesium": "^1.147.0",
     "opening_hours": "^3.15.0",
+    "pbf": "^5.1.2",
     "satellite.js": "^7.1.0",
     "tz-lookup": "^6.1.25"
   },
@@ -27,6 +29,7 @@
     "concurrently": "^10.0.7",
     "typescript": "^5.9.3",
     "vite": "^8.3.7",
+    "vite-plugin-static-copy": "^3.4.0",
     "wrangler": "^4.160.0"
   }
 }

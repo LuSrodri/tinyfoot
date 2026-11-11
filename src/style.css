@@ -1,4 +1,4 @@
-@import 'mapbox-gl/dist/mapbox-gl.css';
+@import 'cesium/Build/Cesium/Widgets/widgets.css';
 
 :root {
   --ink: #e8edf2;
@@ -40,29 +40,6 @@ html, body {
 #map canvas { outline: none; }
 body.mini #map canvas { filter: saturate(1.28) contrast(1.05); }
 body.lite #map canvas { filter: none; }
-
-/* ---------------------------------------------------------------- tilt-shift
-   Real tilt-shift lenses keep a thin slice of the scene sharp. We fake it with
-   progressively stronger backdrop blurs toward the top and bottom edges. */
-#tiltshift { position: fixed; inset: 0; pointer-events: none; display: none; }
-body.mini #tiltshift { display: block; }
-#tiltshift .band { position: absolute; left: 0; right: 0; }
-#tiltshift .band.top { top: 0; height: 40%; }
-#tiltshift .band.bottom { bottom: 0; height: 30%; }
-#tiltshift .band i { position: absolute; inset: 0; }
-#tiltshift .band i:nth-child(1) { backdrop-filter: blur(var(--b1)); -webkit-backdrop-filter: blur(var(--b1)); }
-#tiltshift .band i:nth-child(2) { backdrop-filter: blur(var(--b2)); -webkit-backdrop-filter: blur(var(--b2)); }
-#tiltshift .band i:nth-child(3) { backdrop-filter: blur(var(--b3)); -webkit-backdrop-filter: blur(var(--b3)); }
-#tiltshift .top i:nth-child(1) { mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%); -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%); }
-#tiltshift .top i:nth-child(2) { mask-image: linear-gradient(to bottom, #000 0%, #000 25%, transparent 70%); -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 25%, transparent 70%); }
-#tiltshift .top i:nth-child(3) { mask-image: linear-gradient(to bottom, #000 0%, transparent 42%); -webkit-mask-image: linear-gradient(to bottom, #000 0%, transparent 42%); }
-#tiltshift .bottom i:nth-child(1) { mask-image: linear-gradient(to top, #000 0%, #000 55%, transparent 100%); -webkit-mask-image: linear-gradient(to top, #000 0%, #000 55%, transparent 100%); }
-#tiltshift .bottom i:nth-child(2) { mask-image: linear-gradient(to top, #000 0%, #000 25%, transparent 70%); -webkit-mask-image: linear-gradient(to top, #000 0%, #000 25%, transparent 70%); }
-#tiltshift .bottom i:nth-child(3) { mask-image: linear-gradient(to top, #000 0%, transparent 42%); -webkit-mask-image: linear-gradient(to top, #000 0%, transparent 42%); }
-body.blur-2 #tiltshift .band i:nth-child(3),
-body.blur-1 #tiltshift .band i:nth-child(3),
-body.blur-1 #tiltshift .band i:nth-child(2) { display: none; }
-#tiltshift .vignette { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 55%, transparent 55%, rgba(8, 14, 22, 0.28) 100%); }
 
 /* ------------------------------------------------------------------- chrome */
 .glass {
@@ -227,24 +204,6 @@ dialog#about select { font: inherit; padding: 6px 10px; border-radius: 9px; back
 dialog#about form button { padding: 8px 16px; border-radius: 10px; border: 0; background: var(--accent); color: #1a1405; font-weight: 700; }
 
 /* MapLibre controls, restyled to match. */
-.mapboxgl-ctrl-group { background: var(--glass) !important; border: 1px solid var(--line); border-radius: 12px !important; overflow: hidden; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28) !important; }
-.mapboxgl-ctrl-group button { width: 36px; height: 36px; }
-.mapboxgl-ctrl-group button + button { border-top: 1px solid var(--line); }
-.mapboxgl-ctrl-group button .mapboxgl-ctrl-icon { filter: invert(1) brightness(1.6); }
-.mapboxgl-ctrl-bottom-right { bottom: calc(var(--safe-b) + 2px); right: var(--safe-r); }
-.mapboxgl-ctrl-attrib { background: rgba(15, 23, 32, 0.6) !important; color: var(--ink-dim); font-size: 10.5px; }
-.mapboxgl-ctrl-attrib a { color: var(--ink-dim) !important; }
-.mapboxgl-ctrl-attrib-button { filter: invert(1); opacity: 0.6; }
-.mapboxgl-popup-content { background: var(--glass-solid); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; font-size: 13px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); max-width: 260px; }
-.mapboxgl-popup-content h3 { margin: 0 20px 2px 0; font-size: 15px; }
-.mapboxgl-popup-content .kind { color: var(--ink-dim); font-size: 12px; text-transform: capitalize; }
-.mapboxgl-popup-content .st { display: inline-block; margin: 8px 0 4px; font-weight: 700; }
-.mapboxgl-popup-content .st.open { color: #51cf66; }
-.mapboxgl-popup-content .st.closed { color: #ff8787; }
-.mapboxgl-popup-content .st.unknown { color: var(--ink-dim); }
-.mapboxgl-popup-content .hours { color: #c9d3dc; font-size: 12px; overflow-wrap: anywhere; }
-.mapboxgl-popup-tip { border-top-color: var(--glass-solid) !important; border-bottom-color: var(--glass-solid) !important; }
-.mapboxgl-popup-close-button { color: var(--ink-dim); font-size: 18px; padding: 2px 8px; }
 
 /* -------------------------------------------------------------- small screens */
 @media (max-width: 760px) {
@@ -277,8 +236,6 @@ dialog#about form button { padding: 8px 16px; border-radius: 10px; border: 0; ba
   #modes button { padding: 8px 6px; flex: 1; font-size: 12.5px; }
   #card { left: calc(var(--gap) + var(--safe-l)); right: calc(var(--gap) + var(--safe-r)); top: auto; bottom: calc(var(--gap) + var(--safe-b) + 96px); width: auto; max-height: 46vh; }
   body.has-card #explore { display: none; }
-  .mapboxgl-ctrl-bottom-right { bottom: calc(var(--safe-b) + 92px); }
-  body.has-card .mapboxgl-ctrl-bottom-right { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -290,5 +247,41 @@ body:not(.gui) #top,
 body:not(.gui) #layers,
 body:not(.gui) #explore,
 body:not(.gui) #modes,
-body:not(.gui) #about-btn,
-body:not(.gui) .mapboxgl-ctrl-group { display: none; }
+body:not(.gui) #about-btn { display: none; }
+
+/* ------------------------------------------------------------ 3D world */
+#map .cesium-widget, #map .cesium-widget canvas { width: 100%; height: 100%; }
+#map .cesium-widget canvas { outline: none; }
+.cesium-widget-credits { font-size: 10px !important; opacity: 0.75; right: 6px !important; left: auto !important; bottom: calc(var(--safe-b) + 4px) !important; }
+.cesium-credit-logoContainer img { height: 18px; }
+.cesium-credit-textContainer, .cesium-credit-expand-link { color: #e8edf2 !important; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); }
+
+#minimap {
+  position: fixed;
+  left: calc(var(--gap) + var(--safe-l));
+  bottom: calc(var(--gap) + var(--safe-b));
+  width: 200px;
+  height: 128px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 2px solid rgba(15, 23, 32, 0.85);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  z-index: 3;
+  cursor: pointer;
+}
+#minimap .cesium-widget-credits { display: none; }
+body.gui #minimap { bottom: calc(var(--gap) + var(--safe-b) + 54px); }
+body.gui #explore { bottom: calc(var(--gap) + var(--safe-b) + 192px); }
+@media (max-width: 760px) { #minimap { width: 128px; height: 84px; } body.has-card #minimap { display: none; } }
+
+.tf-popup { position: fixed; left: 0; top: 0; z-index: 7; pointer-events: auto; max-width: 260px; }
+.tf-popup[hidden] { display: none; }
+.tf-popup-content { background: var(--glass-solid); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 12px 30px 12px 14px; font-size: 13px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); }
+.tf-popup-content h3 { margin: 0 0 2px; font-size: 15px; }
+.tf-popup-content .kind { color: var(--ink-dim); font-size: 12px; text-transform: capitalize; }
+.tf-popup-content .st { display: inline-block; margin: 8px 0 4px; font-weight: 700; }
+.tf-popup-content .st.open { color: #51cf66; }
+.tf-popup-content .st.closed { color: #ff8787; }
+.tf-popup-content .st.unknown { color: var(--ink-dim); }
+.tf-popup-content .hours { color: #c9d3dc; font-size: 12px; overflow-wrap: anywhere; }
+.tf-popup-close { position: absolute; top: 4px; right: 4px; width: 24px; height: 24px; border: 0; background: none; color: var(--ink-dim); font-size: 18px; line-height: 1; }

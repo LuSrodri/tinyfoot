@@ -363,6 +363,30 @@ async function api(path: string, q: URLSearchParams, env: Env, ctx: ExecutionCon
     return cached('cge-sp', { ttl: 300, type: 'text/html; charset=iso-8859-1', urls: ['https://www.cgesp.org/v3/alagamentos.jsp'] }, ctx);
   }
 
+  if (path === 'roads') {
+    // Street geometry for the traffic simulation: one z15 tile (~1.2 km) of OpenStreetMap ways.
+    const x = num(q.get('x'), 0, 32767);
+    const y = num(q.get('y'), 0, 32767);
+    if (x === null || y === null || !Number.isInteger(x) || !Number.isInteger(y)) return json({ error: 'bad_request' }, 400);
+    const n = 2 ** 15;
+    const lon = (v: number) => (v / n) * 360 - 180;
+    const lat = (v: number) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * v) / n))) * 180) / Math.PI;
+    const bbox = [lat(y + 1), lon(x), lat(y), lon(x + 1)].map((v) => v.toFixed(6)).join(',');
+    const kinds = 'motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|living_street|service|pedestrian|footway|path|steps';
+    const query = '[out:json][timeout:25];way[highway~"^(' + kinds + ')$"](' + bbox + ');out geom qt;';
+    return cached(
+      'roads/' + x + '/' + y,
+      {
+        ttl: 86400,
+        timeout: 20000,
+        type: 'application/json',
+        init: { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'data=' + encodeURIComponent(query) },
+        urls: ['https://overpass.openstreetmap.fr/api/interpreter', 'https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter'],
+      },
+      ctx,
+    );
+  }
+
   if (path === 'places') {
     const r = places(q);
     return r ? cached(r[0], r[1], ctx) : json({ error: 'bad_request' }, 400);

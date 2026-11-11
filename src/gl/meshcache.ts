@@ -3,7 +3,7 @@
 
 import type { MeshDef } from './meshes';
 
-const VERSION = 'v3';
+const VERSION = 'v4';
 const DB = 'tinyfoot-meshes';
 const STORE = 'meshes';
 

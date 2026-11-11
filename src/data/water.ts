@@ -232,7 +232,7 @@ export class WaterLayer implements Layer {
         }
         if (pts.length) void this.model(pts);
         if (frame.zoom >= 8 && intersects(b, US) && this.due(`usgs:${Math.round(frame.lat * 2)},${Math.round(frame.lon * 2)}`, 300, frame.now)) void this.usgs(b);
-        if (frame.zoom >= 9 && intersects(b, BR)) void this.ana(frame, b);
+        if (frame.zoom >= 8 && intersects(b, BR)) void this.ana(frame, b);
         if (frame.zoom >= 8 && intersects(b, SP_CITY) && this.due('cge', 300, frame.now)) void this.cge();
       }
       this.state = this.gauges.size ? 'live' : frame.zoom < 6.5 ? 'idle' : 'loading';

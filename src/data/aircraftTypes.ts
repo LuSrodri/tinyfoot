@@ -299,6 +299,11 @@ export function setMeshRegistrar(fn: (mesh: MeshDef) => number): void {
   register = fn;
 }
 
+/** Adds a mesh to the 3D layer and returns its index. */
+export function registerMesh(mesh: MeshDef): number {
+  return register(mesh);
+}
+
 function make(code: string, name: string, fam: Fam, length: number): TypeInfo {
   if (fam === 'H') return { name, length, scale: length / 12.5, mesh: () => M.Heli };
   let index = -1;

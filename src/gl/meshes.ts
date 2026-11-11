@@ -316,72 +316,271 @@ export function buildAirframe(s: AirframeSpec): MeshDef {
 
 function helicopter(): MeshDef {
   const b = new Builder();
-  b.tube([[-3.2, 0.3, 0.4, 0.5], [-1.6, 1.0, 1.05, 0.1], [1.4, 1.05, 1.1, 0], [2.6, 0.7, 0.75, -0.2], [3.1, 0.15, 0.2, -0.35]], 8, 0);
-  b.box(-0.75, 1.3, 0.05, 0.75, 2.75, 0.75, 4);
-  b.tube([[-8.2, 0.14, 0.16, 0.9], [-3.0, 0.3, 0.36, 0.55]], 6, 1);
-  b.slab([0, -8.0, 0.9], 1.1, 0.12, [0, -8.5, 2.3], 0.6, 0.08, 1, true);
-  b.box(-0.08, -8.35, 0.5, 0.08, -8.2, 2.5, 2);
-  b.box(-0.2, -0.3, 1.0, 0.2, 0.3, 1.7, 2);
-  b.box(-6.2, -0.22, 1.7, 6.2, 0.22, 1.82, 2);
-  b.box(-0.22, -6.2, 1.7, 0.22, 6.2, 1.82, 2);
-  for (const side of [-1, 1]) b.box(side * 1.15 - 0.07, -1.8, -1.55, side * 1.15 + 0.07, 2.2, -1.42, 2);
+  // Cabin and engine cowling.
+  b.tubeSmooth([[-3.3, 0.25, 0.3, 0.55], [-2.2, 0.85, 0.9, 0.3], [-0.6, 1.05, 1.15, 0.1], [1.5, 1.05, 1.1, 0], [2.5, 0.75, 0.8, -0.2], [3.05, 0.2, 0.25, -0.4]], 12, (s) => (s < -0.35 ? 8 : 0));
+  b.tubeSmooth([[-2.4, 0.3, 0.25, 1.15], [-1.4, 0.6, 0.45, 1.25], [0.4, 0.6, 0.45, 1.25], [1.0, 0.3, 0.2, 1.1]], 8, () => 0);
+  // Glazing: windscreen, chin and side windows.
+  b.box(-0.8, 1.55, 0.05, 0.8, 2.85, 0.85, 4);
+  b.box(-0.55, 2.4, -0.75, 0.55, 2.95, -0.2, 4);
+  for (const side of [-1, 1]) b.box(side * 1.0, -0.9, 0.15, side * 1.09, 1.4, 0.8, 4);
+  // Tail boom, fin, stabiliser and tail rotor.
+  b.tubeSmooth([[-8.4, 0.12, 0.14, 0.95], [-3.0, 0.28, 0.34, 0.6]], 8, () => 1);
+  b.slab([0, -8.0, 0.95], 1.2, 0.12, [0, -8.7, 2.5], 0.55, 0.07, 1, true);
+  b.slab([-1.0, -7.2, 0.95], 0.6, 0.07, [1.0, -7.2, 0.95], 0.6, 0.07, 3);
+  for (let i = 0; i < 2; i++) {
+    const a = (i / 2) * Math.PI;
+    b.slab([0.16, -8.45 - Math.cos(a) * 0.9, 1.7 - Math.sin(a) * 0.9], 0.04, 0.16, [0.16, -8.45 + Math.cos(a) * 0.9, 1.7 + Math.sin(a) * 0.9], 0.04, 0.16, 2, true);
+  }
+  // Mast and a four-blade main rotor.
+  b.box(-0.13, -0.3, 1.5, 0.13, 0.1, 2.0, 2);
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2;
+    b.slab([Math.sin(a) * 0.3, Math.cos(a) * 0.3 - 0.1, 2.0], 0.34, 0.05, [Math.sin(a) * 6.2, Math.cos(a) * 6.2 - 0.1, 2.08], 0.26, 0.04, 2);
+  }
+  // Skids on four struts.
+  for (const side of [-1, 1]) {
+    b.box(side * 1.25 - 0.06, -1.9, -1.6, side * 1.25 + 0.06, 2.3, -1.48, 2);
+    for (const y of [-1.2, 1.3]) b.slab([side * 0.75, y, -0.75], 0.09, 0.09, [side * 1.25, y, -1.5], 0.09, 0.09, 2, true);
+  }
   return b.build(12.5);
 }
 
-// --------------------------------------------------------------------- others
+// --------------------------------------------------------------------- ships
 
-function ship(cargo: boolean): MeshDef {
-  const b = new Builder();
-  const L = 100, W = 16;
-  const hull: [number, number][] = [
-    [-W / 2, -L / 2], [W / 2, -L / 2], [W / 2, L * 0.3], [W * 0.3, L * 0.43], [0, L / 2], [-W * 0.3, L * 0.43], [-W / 2, L * 0.3],
+const HULL_L = 100;
+const HULL_W = 16;
+
+/** Hull with a raked bow and rounded stern. Parts: 0 topsides, 8 boot-topping below the waterline, 3 deck. */
+function hull(b: Builder, depth: number): void {
+  const L = HULL_L, W = HULL_W;
+  const outline = (k: number): [number, number][] => [
+    [-W * 0.42 * k, -L / 2], [W * 0.42 * k, -L / 2], [W / 2 * k, -L * 0.44], [W / 2 * k, L * 0.28],
+    [W * 0.36 * k, L * 0.4], [W * 0.14 * k, L * 0.475], [0, L / 2], [-W * 0.14 * k, L * 0.475], [-W * 0.36 * k, L * 0.4], [-W / 2 * k, L * 0.28], [-W / 2 * k, -L * 0.44],
   ];
-  b.extrude(hull, -1, 5.5, 0, 3);
-  b.extrude(hull.map(([x, y]) => [x * 1.02, y * 1.004]), -1.2, 0.9, 2);
-  // Accommodation block and funnel at the stern.
-  b.box(-W * 0.4, -L * 0.44, 5.5, W * 0.4, -L * 0.3, 15, 3);
-  b.box(-W * 0.42, -L * 0.305, 12, W * 0.42, -L * 0.3, 13.6, 4);
-  b.box(-W * 0.14, -L * 0.42, 15, W * 0.14, -L * 0.35, 20, 1);
-  if (cargo) {
-    for (let i = 0; i < 5; i++) {
-      const y0 = -L * 0.26 + i * L * 0.125;
-      b.box(-W * 0.4, y0, 5.5, W * 0.4, y0 + L * 0.105, 5.5 + 5 + (i % 2) * 2.5, i % 2 ? 1 : 0);
+  b.extrude(outline(0.94), -3, 0.6, 8);
+  b.extrude(outline(1), 0.6, depth, 0, 3);
+  // Bulwark at the bow and a rubbing strake.
+  b.extrude(outline(1.012), depth * 0.55, depth * 0.62, 2);
+  for (const side of [-1, 1]) b.box(side * W * 0.3 - 0.2, L * 0.36, depth, side * W * 0.3 + 0.2, L * 0.47, depth + 1.1, 0);
+}
+
+/** Accommodation block with bridge wings, window bands, funnel and mast. */
+function deckhouse(b: Builder, y0: number, y1: number, base: number, decks: number, width: number): number {
+  let z = base;
+  for (let d = 0; d < decks; d++) {
+    const w = width * (d === decks - 1 ? 1.0 : 0.82);
+    b.box(-w / 2, y0 + d * 0.4, z, w / 2, y1 - d * 0.5, z + 2.7, 3);
+    b.box(-w / 2 - 0.05, y0 + d * 0.4 + 0.6, z + 1.2, w / 2 + 0.05, y1 - d * 0.5 + 0.06, z + 2.0, 4);
+    z += 2.7;
+  }
+  // Bridge wings reach out to the ship's side.
+  b.box(-HULL_W * 0.52, y1 - decks * 0.5 - 1.6, z - 2.7, HULL_W * 0.52, y1 - decks * 0.5 - 0.2, z - 2.4, 3);
+  b.box(-0.25, (y0 + y1) / 2, z, 0.25, (y0 + y1) / 2 + 0.5, z + 5, 3);
+  b.box(-2.2, (y0 + y1) / 2 - 0.1, z + 3.4, 2.2, (y0 + y1) / 2 + 0.35, z + 3.7, 3);
+  return z;
+}
+
+function funnel(b: Builder, y: number, base: number, h: number): void {
+  const oval: [number, number][] = Array.from({ length: 12 }, (_, i) => {
+    const ang = (i / 12) * Math.PI * 2;
+    return [Math.cos(ang) * 1.35, y + Math.sin(ang) * 1.9] as [number, number];
+  });
+  b.extrude(oval, base, base + h * 0.74, 1);
+  b.extrude(oval, base + h * 0.74, base + h, 2);
+}
+
+function containerShip(): MeshDef {
+  const b = new Builder();
+  const L = HULL_L, W = HULL_W, D = 6.5;
+  hull(b, D);
+  const top = deckhouse(b, -L * 0.42, -L * 0.33, D, 5, W * 0.9);
+  funnel(b, -L * 0.455, D, 9);
+  void top;
+  // Container bays: stacks of 2.6 m boxes in mixed colours, six across.
+  const colours = [0, 1, 8, 3, 1, 0, 8, 2];
+  let n = 0;
+  for (let bay = 0; bay < 9; bay++) {
+    const y0 = -L * 0.3 + bay * 7.6;
+    const across = bay > 6 ? 4 : 6;
+    for (let i = 0; i < across; i++) {
+      const x0 = -(across * 2.5) / 2 + i * 2.5;
+      const tiers = 2 + ((bay * 7 + i * 3) % 4);
+      for (let t = 0; t < tiers; t++) {
+        b.box(x0 + 0.04, y0, D + t * 2.6, x0 + 2.46, y0 + 6.1, D + t * 2.6 + 2.56, colours[n++ % colours.length]);
+        if (t < tiers - 1 && (i + t) % 2) b.box(x0 + 0.04, y0 + 6.2, D + t * 2.6, x0 + 2.46, y0 + 7.3, D + t * 2.6 + 2.56, colours[n++ % colours.length]);
+      }
     }
-  } else {
-    b.box(-W * 0.36, -L * 0.28, 5.5, W * 0.36, L * 0.22, 9.5, 3);
-    b.box(-W * 0.37, -L * 0.27, 6.6, W * 0.37, L * 0.21, 8.2, 4);
-    b.box(-W * 0.28, -L * 0.2, 9.5, W * 0.28, L * 0.1, 12.5, 3);
+  }
+  b.box(-0.2, L * 0.44, D, 0.2, L * 0.445, D + 7, 3);
+  return b.build(L);
+}
+
+function tanker(): MeshDef {
+  const b = new Builder();
+  const L = HULL_L, W = HULL_W, D = 5.5;
+  hull(b, D);
+  deckhouse(b, -L * 0.43, -L * 0.33, D, 4, W * 0.85);
+  funnel(b, -L * 0.46, D, 8);
+  // Deck piping running fore and aft, with a manifold and cranes amidships.
+  for (const x of [-1.6, -0.5, 0.5, 1.6]) b.tube([[-L * 0.3, 0.28, 0.28, D + 0.9], [L * 0.36, 0.28, 0.28, D + 0.9]], 6, 3, x);
+  for (let k = 0; k < 9; k++) b.box(-W * 0.4, -L * 0.28 + k * 7.6, D, W * 0.4, -L * 0.28 + k * 7.6 + 0.4, D + 0.9, 2);
+  b.box(-W * 0.5, -1.5, D, W * 0.5, 1.5, D + 1.8, 1);
+  for (const side of [-1, 1]) {
+    b.box(side * 3 - 0.3, -0.3, D, side * 3 + 0.3, 0.3, D + 6, 3);
+    b.slab([side * 3, 0, D + 5.6], 0.4, 0.35, [side * 6.8, 0, D + 7.2], 0.3, 0.25, 3);
+  }
+  b.box(-1.6, L * 0.38, D, 1.6, L * 0.43, D + 1.6, 3);
+  return b.build(L);
+}
+
+function passengerShip(): MeshDef {
+  const b = new Builder();
+  const L = HULL_L, W = HULL_W, D = 6;
+  hull(b, D);
+  // Stepped superstructure: each deck a little shorter, with a window band and open promenade rail.
+  let z = D;
+  for (let d = 0; d < 5; d++) {
+    const y0 = -L * 0.42 + d * 2.2, y1 = L * 0.3 - d * 4.5, w = W * (0.96 - d * 0.035);
+    b.box(-w / 2, y0, z, w / 2, y1, z + 2.6, 3);
+    b.box(-w / 2 - 0.05, y0 + 0.8, z + 1.0, w / 2 + 0.05, y1 - 0.6, z + 1.9, 4);
+    b.box(-w / 2 - 0.06, y0, z + 2.5, w / 2 + 0.06, y1, z + 2.62, d % 2 ? 1 : 3);
+    z += 2.6;
+  }
+  // Wheelhouse, funnel, mast and lifeboats along both sides.
+  b.box(-W * 0.44, L * 0.07, z, W * 0.44, L * 0.13, z + 2.4, 3);
+  b.box(-W * 0.45, L * 0.128, z + 0.9, W * 0.45, L * 0.133, z + 1.9, 4);
+  funnel(b, -L * 0.2, z, 7);
+  b.box(-0.2, L * 0.02, z + 2.4, 0.2, L * 0.025, z + 8, 3);
+  for (let k = 0; k < 6; k++) {
+    for (const side of [-1, 1]) b.tube([[-L * 0.3 + k * 9, 0.7, 0.75, D + 5.9], [-L * 0.3 + k * 9 + 6.5, 0.7, 0.75, D + 5.9]], 6, 1, side * (W * 0.5 + 0.3));
   }
   return b.build(L);
 }
 
-function carriage(b: Builder, y0: number, len: number, w: number, h: number, floor: number): void {
+// ------------------------------------------------------------ rail and buses
+
+/** One rail vehicle body with bogies, doors, windows, stripe and roof gear. `nose` tapers that end into a cab. */
+function railCar(b: Builder, y0: number, len: number, w: number, h: number, floor: number, nose: -1 | 0 | 1, doors: number): void {
   const x = w / 2;
-  b.box(-x, y0, floor, x, y0 + len, floor + h, 0);
-  // Window band, slightly proud of the body.
-  b.box(-x * 1.02, y0 + len * 0.04, floor + h * 0.45, x * 1.02, y0 + len * 0.96, floor + h * 0.78, 4);
-  // Accent stripe.
-  b.box(-x * 1.025, y0, floor + h * 0.18, x * 1.025, y0 + len, floor + h * 0.3, 1);
-  // Roof and running gear.
-  b.box(-x * 0.8, y0 + len * 0.05, floor + h, x * 0.8, y0 + len * 0.95, floor + h + 0.2, 3);
-  b.box(-x * 0.85, y0 + len * 0.08, 0, x * 0.85, y0 + len * 0.26, floor, 2);
-  b.box(-x * 0.85, y0 + len * 0.74, 0, x * 0.85, y0 + len * 0.92, floor, 2);
+  const top = floor + h;
+  const rect = (k: number, y: number, z0: number, z1: number): V3[] => [[-x * k, y, z0], [x * k, y, z0], [x * k, y, z1], [-x * k, y, z1]];
+  const ya = nose < 0 ? y0 + 2.6 : y0;
+  const yb = nose > 0 ? y0 + len - 2.6 : y0 + len;
+  b.loft([rect(1, ya, floor, top), rect(1, yb, floor, top)], 0);
+  if (nose !== 0) {
+    // Streamlined cab: body narrows and the windscreen rakes back.
+    const tip = nose > 0 ? y0 + len : y0;
+    const base = nose > 0 ? yb : ya;
+    b.loft([rect(1, base, floor, top), rect(0.9, (base + tip) / 2, floor, top - h * 0.12), rect(0.62, tip, floor + 0.15, floor + h * 0.5)], 0);
+    b.loft([rect(0.8, (base * 0.75 + tip * 0.25), floor + h * 0.52, top - 0.2), rect(0.62, base * 0.2 + tip * 0.8, floor + h * 0.42, floor + h * 0.66)], 4);
+    for (const side of [-1, 1]) b.box(side * x * 0.45 - 0.14, tip - 0.06 * nose, floor + 0.3, side * x * 0.45 + 0.14, tip + 0.06 * nose, floor + 0.5, 3);
+  }
+  // Window band, accent stripe and doors on both sides.
+  for (const side of [-1, 1]) {
+    const xs = side * x;
+    b.box(xs - 0.02 * side, ya + 0.5, floor + h * 0.48, xs + 0.03 * side, yb - 0.5, floor + h * 0.8, 4);
+    b.box(xs - 0.02 * side, ya, floor + h * 0.2, xs + 0.035 * side, yb, floor + h * 0.3, 1);
+    for (let d = 0; d < doors; d++) {
+      const yd = ya + ((d + 0.5) / doors) * (yb - ya);
+      b.box(xs - 0.02 * side, yd - 0.7, floor + 0.05, xs + 0.045 * side, yd + 0.7, floor + h * 0.86, 8);
+      b.box(xs - 0.02 * side, yd - 0.55, floor + h * 0.45, xs + 0.055 * side, yd + 0.55, floor + h * 0.8, 4);
+    }
+  }
+  // Roof with equipment boxes; two bogies with wheels underneath.
+  b.loft([rect(0.86, ya + 0.3, top, top + 0.22), rect(0.86, yb - 0.3, top, top + 0.22)], 3);
+  b.box(-x * 0.5, y0 + len * 0.3, top + 0.2, x * 0.5, y0 + len * 0.45, top + 0.55, 3);
+  for (const f of [0.17, 0.83]) {
+    const yc = y0 + len * f;
+    b.box(-x * 0.78, yc - 1.5, floor - 0.55, x * 0.78, yc + 1.5, floor - 0.05, 2);
+    for (const dy of [-0.95, 0.95]) for (const side of [-1, 1]) wheel(b, side * (x * 0.72), yc + dy, 0.46, 0.14);
+  }
+  b.box(-x * 0.7, y0 + len * 0.36, floor - 0.6, x * 0.7, y0 + len * 0.64, floor - 0.05, 2);
 }
 
-function rail(cars: number, carLen: number, w: number, h: number): MeshDef {
+/** Roof pantograph. */
+function pantograph(b: Builder, y: number, z: number): void {
+  b.box(-0.6, y - 0.9, z, 0.6, y + 0.9, z + 0.12, 2);
+  b.slab([0, y - 0.7, z + 0.1], 0.08, 0.08, [0, y + 0.3, z + 0.95], 0.06, 0.06, 2, true);
+  b.slab([0, y + 0.3, z + 0.95], 0.06, 0.06, [0, y - 0.3, z + 1.7], 0.06, 0.06, 2, true);
+  b.box(-0.95, y - 0.36, z + 1.68, 0.95, y - 0.24, z + 1.76, 2);
+}
+
+function train(): MeshDef {
   const b = new Builder();
-  const total = cars * carLen + (cars - 1) * 0.6;
-  for (let i = 0; i < cars; i++) carriage(b, -total / 2 + i * (carLen + 0.6), carLen, w, h, 0.9);
-  // Windscreen on the leading car.
-  b.box(-w * 0.4, total / 2 - 0.05, 0.9 + h * 0.45, w * 0.4, total / 2 + 0.06, 0.9 + h * 0.85, 4);
+  const cars = 4, carLen = 24, gap = 0.7;
+  const total = cars * carLen + (cars - 1) * gap;
+  for (let i = 0; i < cars; i++) {
+    const y0 = -total / 2 + i * (carLen + gap);
+    railCar(b, y0, carLen, 2.95, 2.85, 1.05, i === 0 ? -1 : i === cars - 1 ? 1 : 0, 2);
+    // Gangway bellows between cars.
+    if (i) b.box(-1.1, y0 - gap, 1.2, 1.1, y0, 3.5, 2);
+  }
+  pantograph(b, -total / 2 + carLen * 1.5, 4.12);
+  pantograph(b, total / 2 - carLen * 1.5, 4.12);
+  return b.build(total);
+}
+
+function tram(): MeshDef {
+  const b = new Builder();
+  // Low-floor articulated tram: three short sections on small wheels.
+  const parts = [9.5, 6, 9.5];
+  const total = parts.reduce((a, c) => a + c, 0) + 1;
+  let y = -total / 2;
+  parts.forEach((len, i) => {
+    railCar(b, y, len, 2.45, 2.75, 0.42, i === 0 ? -1 : i === 2 ? 1 : 0, i === 1 ? 1 : 2);
+    if (i) b.box(-1.0, y - 0.5, 0.5, 1.0, y, 3.0, 2);
+    y += len + 0.5;
+  });
+  pantograph(b, 0, 3.4);
   return b.build(total);
 }
 
 function bus(): MeshDef {
   const b = new Builder();
-  carriage(b, -6, 12, 2.55, 2.7, 0.4);
-  b.box(-1.1, 5.95, 1.5, 1.1, 6.06, 2.7, 4);
-  return b.build(12);
+  const L = 12, x = 1.275, floor = 0.36, top = 3.05;
+  const rect = (k: number, yy: number, z0: number, z1: number): V3[] => [[-x * k, yy, z0], [x * k, yy, z0], [x * k, yy, z1], [-x * k, yy, z1]];
+  // Body with a slightly rounded front and rear.
+  b.loft([rect(0.94, -L / 2, floor, top - 0.1), rect(1, -L / 2 + 0.3, floor, top), rect(1, L / 2 - 0.4, floor, top), rect(0.93, L / 2, floor, top - 0.12)], 0);
+  // Windscreen, destination sign above it, rear window.
+  b.box(-x * 0.86, L / 2 - 0.02, 1.25, x * 0.86, L / 2 + 0.03, 2.5, 4);
+  b.box(-x * 0.7, L / 2 - 0.02, 2.58, x * 0.7, L / 2 + 0.035, 2.9, 1);
+  b.box(-x * 0.8, -L / 2 - 0.03, 1.6, x * 0.8, -L / 2 + 0.02, 2.5, 4);
+  for (const side of [-1, 1]) {
+    const xs = side * x;
+    // Long side windows, a waist stripe, head and tail lamps, mirrors.
+    b.box(xs - 0.02 * side, -L / 2 + 0.5, 1.35, xs + 0.03 * side, L / 2 - 1.5, 2.5, 4);
+    b.box(xs - 0.02 * side, -L / 2 + 0.2, 0.95, xs + 0.035 * side, L / 2 - 0.3, 1.2, 1);
+    b.box(side * x * 0.78 - 0.16, L / 2 - 0.02, 0.6, side * x * 0.78 + 0.16, L / 2 + 0.035, 0.82, 3);
+    b.box(side * x * 0.8 - 0.14, -L / 2 - 0.035, 0.7, side * x * 0.8 + 0.14, -L / 2 + 0.02, 1.0, 1);
+    b.box(xs, L / 2 - 0.5, 2.2, xs + 0.32 * side, L / 2 - 0.38, 2.75, 2);
+    for (const yy of [L / 2 - 2.75, -L / 2 + 2.9]) wheel(b, side * (x - 0.12), yy, 0.5, 0.3);
+  }
+  // Doors on the kerb side (front and middle).
+  for (const yd of [L / 2 - 1.15, -0.4]) {
+    b.box(x - 0.02, yd - 0.62, floor + 0.04, x + 0.045, yd + 0.62, 2.6, 8);
+    b.box(x - 0.02, yd - 0.5, 0.95, x + 0.055, yd + 0.5, 2.45, 4);
+  }
+  // Roof: air-conditioning unit and hatches.
+  b.box(-x * 0.62, -2.6, top, x * 0.62, 0.4, top + 0.32, 3);
+  b.box(-0.45, 2.6, top, 0.45, 3.5, top + 0.1, 3);
+  return b.build(L);
+}
+
+/** Bridge deck piece: 1 wide, 1 long (forward), with kerbs; scaled per segment. */
+function deck(): MeshDef {
+  const b = new Builder();
+  b.box(-0.5, 0, -0.085, 0.5, 1, 0, 3);
+  for (const side of [-1, 1]) b.box(side * 0.5 - 0.012, 0, 0, side * 0.5 + 0.012, 1, 0.07, 3);
+  b.box(-0.2, 0, -0.16, 0.2, 1, -0.085, 3);
+  return b.build(1);
+}
+
+/** Bridge pier, 1 tall; scale sets its height, so it is slender by proportion. */
+function pier(): MeshDef {
+  const b = new Builder();
+  b.box(-0.07, -0.5, 0, 0.07, 0.5, 0.93, 3);
+  b.box(-0.2, -0.6, 0.93, 0.2, 0.6, 1, 3);
+  return b.build(1);
 }
 
 // ------------------------------------------------------------------- road vehicles
@@ -569,6 +768,9 @@ export enum M {
   Van,
   Kei,
   Moto,
+  Deck,
+  Pier,
+  Tanker,
 }
 
 /** Built in the same order as the `M` enum. */
@@ -577,11 +779,11 @@ export function buildMeshes(): MeshDef[] {
     shadow(),
     segment(),
     helicopter(),
-    ship(true),
-    ship(false),
+    containerShip(),
+    passengerShip(),
     bus(),
-    rail(4, 24, 3.0, 3.1),
-    rail(2, 15, 2.5, 2.7),
+    train(),
+    tram(),
     roadCar({ len: 4.05, w: 1.75, h: 1.48, hood: 0.26, boot: 0.03, belt: 0.92, wheel: 0.3, clearance: 0.17 }),
     truck(),
     person(),
@@ -592,5 +794,135 @@ export function buildMeshes(): MeshDef[] {
     roadCar({ len: 5, w: 1.95, h: 2, hood: 0.12, boot: 0.01, belt: 1.15, wheel: 0.34, clearance: 0.2 }),
     roadCar({ len: 3.4, w: 1.48, h: 1.7, hood: 0.14, boot: 0.01, belt: 0.95, wheel: 0.27, clearance: 0.16 }),
     motorcycle(),
+    deck(),
+    pier(),
+    tanker(),
   ];
+}
+
+// ------------------------------------------------------------------ cars by model
+
+export type BodyType = 'H' | 'S' | 'U' | 'P' | 'V' | 'K';
+
+export interface CarModelSpec {
+  /** Real length, width and height in metres. */
+  len: number;
+  w: number;
+  h: number;
+  body: BodyType;
+  /** Small per-model variations (0..1) so that models of the same body type are told apart. */
+  seed: number;
+  /** Electric cars have a closed front instead of a grille. */
+  electric?: boolean;
+}
+
+/**
+ * Side profile of each body type: [position from the nose (0..1), height of the top (0..1 of the
+ * car's height), 1 if it is part of the glasshouse].
+ */
+const PROFILES: Record<BodyType, [number, number, number][]> = {
+  H: [[0, 0.42, 0], [0.03, 0.55, 0], [0.27, 0.63, 0], [0.4, 0.97, 1], [0.48, 1, 1], [0.82, 0.98, 1], [0.93, 0.8, 1], [0.97, 0.63, 0], [1, 0.48, 0]],
+  S: [[0, 0.4, 0], [0.03, 0.53, 0], [0.28, 0.6, 0], [0.43, 0.97, 1], [0.5, 1, 1], [0.7, 0.98, 1], [0.82, 0.66, 1], [0.97, 0.63, 0], [1, 0.5, 0]],
+  U: [[0, 0.5, 0], [0.03, 0.62, 0], [0.23, 0.68, 0], [0.36, 0.97, 1], [0.44, 1, 1], [0.88, 0.99, 1], [0.96, 0.84, 1], [0.985, 0.62, 0], [1, 0.52, 0]],
+  P: [[0, 0.5, 0], [0.03, 0.6, 0], [0.22, 0.66, 0], [0.32, 0.98, 1], [0.39, 1, 1], [0.54, 0.99, 1], [0.565, 0.66, 0], [0.985, 0.63, 0], [1, 0.55, 0]],
+  V: [[0, 0.5, 0], [0.02, 0.6, 0], [0.1, 0.66, 0], [0.21, 0.97, 1], [0.27, 1, 1], [0.97, 1, 1], [1, 0.95, 1]],
+  K: [[0, 0.45, 0], [0.02, 0.58, 0], [0.08, 0.64, 0], [0.17, 0.98, 1], [0.22, 1, 1], [0.98, 1, 1], [1, 0.9, 1]],
+};
+
+/** Height of the waist line (bottom of the side windows) at the nose and at the tail. */
+const BELT: Record<BodyType, [number, number]> = { H: [0.58, 0.65], S: [0.56, 0.62], U: [0.62, 0.69], P: [0.62, 0.64], V: [0.55, 0.57], K: [0.55, 0.56] };
+/** Front and rear axle positions (fraction of length from the nose). */
+const AXLES: Record<BodyType, [number, number]> = { H: [0.17, 0.81], S: [0.18, 0.78], U: [0.17, 0.8], P: [0.16, 0.79], V: [0.12, 0.82], K: [0.11, 0.86] };
+
+export function buildCar(s: CarModelSpec): MeshDef {
+  const b = new Builder();
+  const L = s.len, H = s.h, W = s.w;
+  const tall = s.body === 'U' || s.body === 'P' || s.body === 'V';
+  const clearance = tall ? 0.21 : 0.15;
+  const wheelR = Math.min(0.42, Math.max(0.27, H * (tall ? 0.21 : 0.205)));
+  // Per-model touches: a slightly longer bonnet, a faster or more upright rear, a lower roof.
+  const v = (k: number) => ((Math.sin(s.seed * 97.13 + k * 31.7) + 1) / 2 - 0.5);
+  const prof = PROFILES[s.body].map(([f, top, cab], i, arr) => {
+    const shift = i > 1 && i < arr.length - 2 ? v(i) * 0.025 : 0;
+    return [Math.min(1, Math.max(0, f + shift)), top * (cab ? 1 + v(9) * 0.02 : 1 + v(i + 3) * 0.03), cab] as [number, number, number];
+  });
+  const [bf, br] = BELT[s.body];
+  const taper = (f: number) => (f < 0.07 ? 0.86 + 0.14 * (f / 0.07) : f > 0.93 ? 0.86 + 0.14 * ((1 - f) / 0.07) : 1);
+
+  interface Station { y: number; ring: V3[]; cab: boolean; top: number }
+  const stations: Station[] = prof.map(([f, topF, cab]) => {
+    const y = L / 2 - f * L;
+    const hw = (W / 2) * taper(f);
+    let top = topF * H;
+    let belt = (bf + (br - bf) * f) * H;
+    if (!cab) {
+      // Bonnet and boot: the top is the panel itself, just above the shoulder line.
+      belt = Math.min(belt, top - 0.04);
+    } else {
+      belt = Math.min(belt, top - 0.05);
+    }
+    top = Math.max(top, belt + 0.03);
+    const topW = cab ? hw * 0.74 : hw * 0.9;
+    const mid = (clearance + belt) / 2;
+    const ring: V3[] = [
+      [-hw * 0.92, y, clearance], [hw * 0.92, y, clearance], [hw, y, mid], [hw * 0.97, y, belt],
+      [topW, y, top], [-topW, y, top], [-hw * 0.97, y, belt], [-hw, y, mid],
+    ];
+    return { y, ring, cab: Boolean(cab), top };
+  });
+
+  for (let i = 0; i < stations.length - 1; i++) {
+    const A = stations[i], B = stations[i + 1];
+    const c: V3 = [0, (A.y + B.y) / 2, (A.top + B.top) / 4 + clearance / 2];
+    const glassSides = A.cab && B.cab;
+    const slope = Math.abs(A.top - B.top) / Math.max(0.01, Math.abs(A.y - B.y));
+    const glassTop = (A.cab || B.cab) && slope > 0.35;
+    for (let k = 0; k < 8; k++) {
+      const k2 = (k + 1) % 8;
+      let part = 0;
+      if (k === 0) part = 2;
+      else if (k === 3 || k === 5) part = glassSides ? 4 : 0;
+      else if (k === 4) part = glassTop ? 4 : 0;
+      else if ((k === 1 || k === 7) && tall) part = 8;
+      b.quad(A.ring[k], A.ring[k2], B.ring[k2], B.ring[k], part, c);
+    }
+  }
+  // Nose and tail caps.
+  for (const [st, dir] of [[stations[0], 1], [stations[stations.length - 1], -1]] as const) {
+    const cc: V3 = [0, st.y - dir, (clearance + st.top) / 2];
+    for (let k = 1; k < 7; k++) b.tri(st.ring[0], st.ring[k], st.ring[k + 1], 0, cc);
+  }
+
+  // Lamps, grille, bumpers, plates.
+  const front = stations[0].y, rear = stations[stations.length - 1].y;
+  const fBelt = bf * H, rBelt = br * H;
+  for (const side of [-1, 1]) {
+    b.box(side * W * 0.36 - 0.17, front - 0.12, fBelt - 0.16, side * W * 0.36 + 0.17, front + 0.02, fBelt - 0.04, 9);
+    b.box(side * W * 0.38 - 0.13, rear - 0.02, rBelt - 0.18, side * W * 0.38 + 0.13, rear + 0.1, rBelt - 0.05, 1);
+    // Mirrors at the base of the windscreen.
+    const ms = stations.find((st) => st.cab) ?? stations[3];
+    b.box(side * (W / 2) - (side > 0 ? 0 : 0.14), ms.y - 0.08, fBelt + 0.04, side * (W / 2) + (side > 0 ? 0.14 : 0), ms.y + 0.06, fBelt + 0.16, 0);
+  }
+  if (!s.electric) b.box(-W * 0.24, front - 0.06, fBelt - 0.36, W * 0.24, front + 0.03, fBelt - 0.12, 2);
+  b.box(-W * 0.47, front - 0.08, clearance, W * 0.47, front + 0.04, clearance + 0.16, 2);
+  b.box(-W * 0.47, rear - 0.04, clearance, W * 0.47, rear + 0.08, clearance + 0.16, 2);
+  b.box(-0.24, front + 0.035, clearance + 0.18, 0.24, front + 0.05, clearance + 0.29, 3);
+  b.box(-0.24, rear - 0.05, rBelt - 0.42, 0.24, rear - 0.035, rBelt - 0.31, 3);
+
+  if (s.body === 'P') {
+    // Open load bed: dark floor between the side walls, behind the cab.
+    const cabEnd = L / 2 - 0.57 * L;
+    b.box(-W * 0.42, rear + 0.08, rBelt - 0.25, W * 0.42, cabEnd - 0.05, rBelt + 0.012, 2);
+  }
+  if (s.body === 'U') {
+    const roof = stations.filter((st) => st.cab);
+    for (const side of [-1, 1]) b.box(side * W * 0.33 - 0.03, roof[roof.length - 1].y + 0.2, H + 0.0, side * W * 0.33 + 0.03, roof[0].y - 0.25, H + 0.06, 2);
+  }
+
+  // Wheels: tyre and rim.
+  const [fa, ra] = AXLES[s.body];
+  for (const f of [fa, ra]) {
+    for (const side of [-1, 1]) wheel(b, side * (W / 2 - 0.12), L / 2 - f * L, wheelR, 0.22);
+  }
+  return b.build(L);
 }

@@ -71,7 +71,7 @@ export class ShipLayer implements Layer {
     const k = kind(m?.shipType);
     const len = (m?.referencePointA ?? 0) + (m?.referencePointB ?? 0);
     s.length = len > 5 && len < 460 ? len : k === 'cargo' || k === 'tanker' ? 140 : k === 'passenger' ? 90 : 24;
-    s.mesh = k === 'cargo' || k === 'tanker' ? M.Cargo : M.Ferry;
+    s.mesh = k === 'cargo' ? M.Cargo : k === 'tanker' ? M.Tanker : M.Ferry;
     const h = hash(String(s.mmsi));
     if (k === 'cargo') {
       s.c1 = [0x1f3a5f, 0x7a1f1f, 0x1c1c1c, 0x24513a][h % 4];
@@ -191,7 +191,8 @@ export class ShipLayer implements Layer {
       const scale = (s.length / 100) * size;
       const mx = mercX(m.lon);
       const my = mercY(m.lat);
-      scene.add(s.mesh, mx, my, 0, m.heading * DEG, scale, scale, 0, s.c1, s.c2);
+      const sea = frame.zoom > 9 ? this.ctx.elevAt(m.lat, m.lon) : 0;
+      scene.add(s.mesh, mx, my, sea, m.heading * DEG, scale, scale, 0, s.c1, s.c2, 0x7a2a22);
       scene.pickable(mx, my, 6 * scale, Math.max(14, minPx * 0.8), s);
     }
   }

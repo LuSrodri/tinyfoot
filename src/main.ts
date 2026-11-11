@@ -1,5 +1,4 @@
 import './style.css';
-import mapboxgl from 'mapbox-gl';
 import { detectTier, getJson, tierFor, type Ctx, type Layer, type Quality, type Selection } from './core';
 import { AircraftLayer } from './data/aircraft';
 import { setMeshRegistrar } from './data/aircraftTypes';
@@ -12,7 +11,9 @@ import { WeatherWatch } from './data/weather';
 import { loadMeshCache } from './gl/meshcache';
 import { InstancedLayer, type FrameInfo, type Scene } from './gl/instanced';
 import { buildMeshes } from './gl/meshes';
-import { Basemap, MODES, type Mode } from './map/basemap';
+import { Minimap } from './world/minimap';
+import { Popup } from './world/popup';
+import { MODES, World, type Mode } from './world/world';
 import { PeopleLayer, RoadNet, TrafficLayer } from './sim/traffic';
 import { solarHour, sunElevation } from './util/geo';
 import { lang, t, type Key } from './util/i18n';
@@ -68,13 +69,14 @@ interface Spot {
 }
 
 const SPOTS: Spot[] = [
-  { label: 'GRU ✈', center: [-46.4731, -23.4322], zoom: 13.6, pitch: 58, bearing: 60 },
-  { label: 'Heathrow ✈', center: [-0.4543, 51.47], zoom: 13.4, pitch: 58, bearing: -20 },
-  { label: 'Manhattan', center: [-74.0092, 40.7095], zoom: 15.6, pitch: 62, bearing: 28 },
-  { label: 'Boston', center: [-71.0603, 42.3554], zoom: 14.6, pitch: 58, bearing: -15 },
-  { label: 'Helsinki', center: [24.9458, 60.1652], zoom: 14.2, pitch: 56, bearing: 20 },
-  { label: 'Paris', center: [2.2945, 48.8584], zoom: 15.8, pitch: 62, bearing: -40 },
-  { label: 'Rio', center: [-43.2105, -22.9519], zoom: 13.4, pitch: 64, bearing: 150 },
+  { label: 'Copacabana', center: [-43.1786, -22.9671], zoom: 18.2, pitch: 48, bearing: 150 },
+  { label: 'Cristo Redentor', center: [-43.2105, -22.9519], zoom: 17.6, pitch: 50, bearing: 150 },
+  { label: 'Av. Paulista', center: [-46.6555, -23.5614], zoom: 17.6, pitch: 48, bearing: 40 },
+  { label: 'GRU ✈', center: [-46.4731, -23.4322], zoom: 15.8, pitch: 48, bearing: 60 },
+  { label: 'Manhattan', center: [-74.0092, 40.7095], zoom: 17.2, pitch: 48, bearing: 28 },
+  { label: 'Paris', center: [2.2945, 48.8584], zoom: 17.4, pitch: 48, bearing: -40 },
+  { label: 'Helsinki', center: [24.9458, 60.1652], zoom: 16.4, pitch: 48, bearing: 20 },
+  { label: 'Boston', center: [-71.0603, 42.3554], zoom: 16.6, pitch: 48, bearing: -15 },
   { label: 'ISS 🛰', center: [0, 0], zoom: 2.6, pitch: 0, bearing: 0, action: 'iss' },
 ];
 
@@ -87,9 +89,25 @@ async function main(): Promise<void> {
   if (!MODES.includes(mode)) mode = 'mini';
 
   await loadMeshCache();
-  const base = await Basemap.create('map', tier, mode);
+  const base = await World.create('map', tier, mode);
   const weather = new WeatherWatch(base);
-  const map = base.map;
+  const map = base;
+  // Camera position lives in the address, so a view can be shared and survives reloads.
+  const fromHash = (): boolean => {
+    const p = location.hash.slice(1).split('/').map(Number);
+    if (p.length < 3 || p.some((n) => !Number.isFinite(n))) return false;
+    map.jumpTo({ zoom: p[0], center: [p[2], p[1]], bearing: p[3] ?? 0, pitch: p[4] ?? 48 });
+    return true;
+  };
+  if (!fromHash()) map.jumpTo({ center: SPOTS[0].center, zoom: SPOTS[0].zoom, pitch: SPOTS[0].pitch, bearing: SPOTS[0].bearing });
+  map.on('moveend', () => {
+    const c = map.getCenter();
+    const heading = ((base.widget.scene.camera.heading * 180) / Math.PI + 360) % 360;
+    history.replaceState(null, '', `#${map.getZoom().toFixed(2)}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}/${heading.toFixed(0)}/${map.getPitch().toFixed(0)}${''}`.replace(/^#/, `${location.pathname}${location.search}#`));
+  });
+  const minimapEl = $('minimap');
+  const minimap = tier.quality === 'low' ? null : new Minimap(minimapEl, base);
+  if (!minimap) minimapEl.hidden = true;
 
   const ctx: Ctx = {
     map,
@@ -97,13 +115,14 @@ async function main(): Promise<void> {
     lang,
     selection: null,
     caps: { ais: false, sptrans: false },
-    elevAt: (lat, lon) => base.elevation(lat, lon),
+    elevAt: (lat, lon) => base.elevAt(lat, lon),
   };
   void getJson<{ ais: boolean; sptrans: boolean }>('/api/health').then((h) => {
     if (h) ctx.caps = { ais: Boolean(h.ais), sptrans: Boolean(h.sptrans) };
   });
 
-  const net = new RoadNet(map, () => (map.getSource(base.vectorSource) ? base.vectorSource : null));
+  const net = new RoadNet(map);
+  base.setProbeSource(() => net.probes());
   const aircraft = new AircraftLayer(ctx);
   const satellites = new SatelliteLayer(ctx);
   const ships = new ShipLayer(ctx);
@@ -188,12 +207,17 @@ async function main(): Promise<void> {
       }
     },
     nightAt,
+    () => {
+      const v = base.view();
+      return { lat: v.lat, lon: v.lng, height: v.h, zoom: v.zoom, mpp: v.mpp, globe: v.globe };
+    },
   );
   layer3d.maxFps = tier.maxFps;
   setMeshRegistrar((mesh) => layer3d.addMesh(mesh));
-  base.attach(layer3d);
+  layer3d.attach(base.widget.scene);
+  base.exclude = [layer3d];
 
-  const popup = new mapboxgl.Popup({ closeButton: true, maxWidth: '260px', offset: 10 });
+  const popup = new Popup(base);
   map.on('click', (e) => {
     const ref = layer3d.pick(e.point.x, e.point.y);
     if (ref) {
@@ -219,7 +243,7 @@ async function main(): Promise<void> {
       src.className = 'kind';
       src.textContent = p.source;
       el.append(h, st, src);
-      popup.setLngLat(e.lngLat).setDOMContent(el).addTo(map);
+      popup.setLngLat(e.lngLat).setDOMContent(el).addTo();
       return;
     }
     const hits = map.getLayer('tf-places') ? map.queryRenderedFeatures([[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]], { layers: ['tf-places'] }) : [];
@@ -239,7 +263,7 @@ async function main(): Promise<void> {
       hours.textContent = p.hours;
       el.append(h, kind, st, hours);
       const g = hits[0].geometry;
-      popup.setLngLat(g.type === 'Point' ? (g.coordinates as [number, number]) : e.lngLat).setDOMContent(el).addTo(map);
+      popup.setLngLat(g.type === 'Point' ? (g.coordinates as [number, number]) : e.lngLat).setDOMContent(el).addTo();
       return;
     }
     if (ctx.selection) select(null);
@@ -254,7 +278,7 @@ async function main(): Promise<void> {
 
   // ---------------------------------------------------------------- modes
   const modes = $('modes');
-  const modeLabel: Record<Mode, Key> = { mini: 'modeMini', map: 'modeMap', sat: 'modeSat', night: 'modeNight' };
+  const modeLabel: Record<Mode, Key> = { mini: 'modeMini', photo: 'modeMap', night: 'modeNight' };
   const applyModeClass = (): void => {
     document.body.classList.toggle('mini', base.mode === 'mini');
     document.body.classList.toggle('lite', tier.quality === 'low');
@@ -279,24 +303,8 @@ async function main(): Promise<void> {
     modes.append(b);
   }
 
-  // The sharp band narrows as the camera tilts, like a real tilt-shift lens.
-  function updateBlur(): void {
-    const s = base.mode === 'mini' ? 0.4 + 0.6 * Math.min(1, map.getPitch() / 60) : 0;
-    const root = document.documentElement.style;
-    root.setProperty('--b1', `${(1.1 * s).toFixed(2)}px`);
-    root.setProperty('--b2', `${(2.8 * s).toFixed(2)}px`);
-    root.setProperty('--b3', `${(6 * s).toFixed(2)}px`);
-    // Set the blur inline as well: CSS minifiers have been seen to drop the unprefixed property.
-    const radii = [1.1 * s, 2.8 * s, 6 * s];
-    for (const band of document.querySelectorAll('#tiltshift .band')) {
-      band.querySelectorAll<HTMLElement>('i').forEach((el, k) => {
-        const value = `blur(${radii[k].toFixed(2)}px)`;
-        el.style.setProperty('backdrop-filter', value);
-        el.style.setProperty('-webkit-backdrop-filter', value);
-      });
-    }
-  }
-  map.on('pitch', updateBlur);
+  // Tilt-shift and the miniature colour are post-processing passes in the 3D world itself.
+  const updateBlur = (): void => undefined;
   applyModeClass();
   updateBlur();
 
@@ -360,7 +368,7 @@ async function main(): Promise<void> {
           select(sel);
           setFollow(true);
           easing = Date.now() + 1250;
-          map.easeTo({ zoom: 2.6, pitch: 0, duration: 1200 });
+          map.easeTo({ zoom: 3.2, pitch: 0, duration: 1200 });
         }
         return;
       }
@@ -377,18 +385,15 @@ async function main(): Promise<void> {
   q.setAttribute('aria-label', t('search'));
   let searchSeq = 0;
   let searchTimer = 0;
-  interface Hit {
-    geometry: { coordinates: [number, number] };
-    properties: { name?: string; city?: string; state?: string; country?: string; type?: string; extent?: [number, number, number, number]; osm_value?: string };
-  }
+  type Hit = Awaited<ReturnType<World['search']>>[number];
   const go = (hit: Hit): void => {
     results.hidden = true;
     q.blur();
-    const ext = hit.properties.extent;
-    if (ext && Math.abs(ext[2] - ext[0]) > 0.02) {
-      map.fitBounds([[ext[0], ext[3]], [ext[2], ext[1]]], { padding: 60, pitch: 50, maxZoom: 15.5, duration: 2200, essential: true });
+    const ext = hit.extent;
+    if (ext && Math.abs(ext[2] - ext[0]) > 0.01) {
+      map.fitBounds([[ext[0], ext[3]], [ext[2], ext[1]]], { pitch: 48, maxZoom: 18, duration: 2200 });
     } else {
-      map.flyTo({ center: hit.geometry.coordinates, zoom: 15.8, pitch: 58, speed: 1.4, essential: true });
+      map.flyTo({ center: hit.center, zoom: 18, pitch: 48, duration: 2200 });
     }
   };
   const runSearch = async (): Promise<void> => {
@@ -398,17 +403,20 @@ async function main(): Promise<void> {
       results.hidden = true;
       return;
     }
-    const data = await getJson<{ features: Hit[] }>(`https://photon.komoot.io/api?q=${encodeURIComponent(text)}&limit=6`);
+    let hits: Hit[] = [];
+    try {
+      hits = await base.search(text);
+    } catch {
+      hits = [];
+    }
     if (seq !== searchSeq) return;
-    const hits = data?.features ?? [];
     results.replaceChildren(
       ...hits.map((hit) => {
         const li = document.createElement('li');
         li.role = 'option';
-        const p = hit.properties;
-        li.textContent = p.name ?? p.city ?? p.country ?? '';
+        li.textContent = hit.name;
         const small = document.createElement('small');
-        small.textContent = [p.city !== p.name ? p.city : '', p.state, p.country].filter(Boolean).join(', ');
+        small.textContent = hit.detail;
         li.append(small);
         li.addEventListener('click', () => go(hit));
         return li;
@@ -463,6 +471,7 @@ async function main(): Promise<void> {
     const now = Date.now();
     base.updateLight(now);
     weather.tick(now);
+    minimap?.update();
     const c = map.getCenter();
     const hour = solarHour(c.lng, now);
     const hh = String(Math.floor(hour)).padStart(2, '0');

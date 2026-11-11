@@ -1,4 +1,4 @@
-import type { Map as MlMap } from 'mapbox-gl';
+import type { WorldMap as MlMap } from './world/world';
 import type { FrameInfo, Scene } from './gl/instanced';
 
 export type Quality = 'low' | 'medium' | 'high';

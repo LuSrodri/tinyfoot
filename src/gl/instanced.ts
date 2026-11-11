@@ -1,14 +1,23 @@
-// One custom WebGL layer that draws every moving thing on the map with hardware instancing.
-// It follows Mapbox GL's two camera models: on the globe (far out) positions are placed on a
-// sphere, and at street level, where the map is flat, a camera-relative matrix keeps small
-// objects free of float-precision jitter. Between the two it blends, as the map itself does.
+// One Cesium primitive that draws every moving thing (aircraft, ships, trains, cars, people,
+// satellites) with hardware instancing, depth-tested against the photorealistic 3D tiles.
+//
+// Each instance is placed on the WGS84 ellipsoid on the CPU in double precision, relative to a
+// reference point near the camera (so float32 on the GPU stays precise to millimetres), with its
+// local east/north/up frame. The model is turned to its heading in that frame on the GPU.
 
-import type { CustomLayerInterface, Map as MbMap } from 'mapbox-gl';
-import { EARTH_C, DEG, mercScale, mercX, mercY } from '../util/geo';
+import * as Cesium from 'cesium';
+import { BoundingSphere, Cartesian3, Matrix4, SceneTransforms, type Scene as CesiumScene } from 'cesium';
+import { DEG, mercScale } from '../util/geo';
 import type { MeshDef } from './meshes';
 
-/** Floats per instance. */
-const STRIDE = 17;
+// Renderer classes that CesiumJS exports but does not type.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const C = Cesium as any;
+
+/** Floats per instance: position(3) east(3) north(3) heading/scale/scale/climb(4) colours(9). */
+const STRIDE = 22;
+const A = 6378137;
+const E2 = 6.69437999014e-3;
 
 export interface FrameInfo {
   /** Epoch ms. */
@@ -16,25 +25,41 @@ export interface FrameInfo {
   /** Seconds since the previous frame (clamped). */
   dt: number;
   zoom: number;
-  /** Metres per CSS pixel at the map centre. */
+  /** Metres per CSS pixel at the view centre. */
   mpp: number;
   lat: number;
   lon: number;
   globe: boolean;
-  /** 0 = day, 1 = night at the map centre. */
+  /** 0 = day, 1 = night at the view centre. */
   night: number;
 }
 
+/** Where the camera looks; supplied by the world each frame. */
+export interface ViewState {
+  lat: number;
+  lon: number;
+  /** Ground height at the view centre, metres above the ellipsoid. */
+  height: number;
+  zoom: number;
+  mpp: number;
+  globe: boolean;
+}
+
+const latFromMerc = (y: number): number => Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) / DEG;
+
 export class Scene {
+  /** Reference point (ECEF metres) every instance position is relative to. */
+  readonly ref = new Float64Array(3);
+  /** Reference point in mercator, kept for code that reasons in map units. */
   refX = 0;
   refY = 0;
   readonly bufs: Float32Array[];
   readonly counts: number[];
-  private px: number[] = [];
-  private py: number[] = [];
-  private pz: number[] = [];
-  private pr: number[] = [];
-  private pref: unknown[] = [];
+  /** Largest distance of any instance from the reference point, for culling. */
+  radius = 0;
+  private pickPos: number[] = [];
+  private pickR: number[] = [];
+  private pickRef: unknown[] = [];
 
   constructor(meshCount: number) {
     this.bufs = Array.from({ length: meshCount }, () => new Float32Array(STRIDE * 64));
@@ -47,16 +72,18 @@ export class Scene {
     this.counts.push(0);
   }
 
-  begin(refX: number, refY: number): void {
+  begin(lat: number, lon: number, height: number, refX: number, refY: number): void {
+    ecef(lat * DEG, lon * DEG, height, this.ref, 0);
     this.refX = refX;
     this.refY = refY;
+    this.radius = 0;
     this.counts.fill(0);
-    this.px.length = this.py.length = this.pz.length = this.pr.length = this.pref.length = 0;
+    this.pickPos.length = this.pickR.length = this.pickRef.length = 0;
   }
 
   /**
    * @param mx,my   absolute mercator position (0..1)
-   * @param elev    metres above sea level
+   * @param elev    metres above the ellipsoid
    * @param heading radians clockwise from north
    * @param sx      scale across and up
    * @param sy      scale along the model's forward axis
@@ -65,6 +92,7 @@ export class Scene {
    */
   add(mesh: number, mx: number, my: number, elev: number, heading: number, sx: number, sy: number, climb: number, c1: number, c2: number, c3 = 0xd5d8dc): void {
     let buf = this.bufs[mesh];
+    if (!buf) return;
     const n = this.counts[mesh];
     const o = n * STRIDE;
     if (o + STRIDE > buf.length) {
@@ -72,379 +100,292 @@ export class Scene {
       grown.set(buf);
       this.bufs[mesh] = buf = grown;
     }
-    let rx = mx - this.refX;
-    if (rx > 0.5) rx -= 1;
-    else if (rx < -0.5) rx += 1;
-    buf[o] = rx;
-    buf[o + 1] = my - this.refY;
-    buf[o + 2] = elev;
-    buf[o + 3] = heading;
-    buf[o + 4] = sx;
-    buf[o + 5] = sy;
-    buf[o + 6] = climb;
-    buf[o + 7] = mercScale(my);
-    buf[o + 8] = ((c1 >> 16) & 255) / 255;
-    buf[o + 9] = ((c1 >> 8) & 255) / 255;
-    buf[o + 10] = (c1 & 255) / 255;
-    buf[o + 11] = ((c2 >> 16) & 255) / 255;
-    buf[o + 12] = ((c2 >> 8) & 255) / 255;
-    buf[o + 13] = (c2 & 255) / 255;
-    buf[o + 14] = ((c3 >> 16) & 255) / 255;
-    buf[o + 15] = ((c3 >> 8) & 255) / 255;
-    buf[o + 16] = (c3 & 255) / 255;
+    const lon = (mx * 360 - 180) * DEG;
+    const lat = latFromMerc(my) * DEG;
+    const sl = Math.sin(lat), cl = Math.cos(lat), so = Math.sin(lon), co = Math.cos(lon);
+    const nn = A / Math.sqrt(1 - E2 * sl * sl);
+    const x = (nn + elev) * cl * co - this.ref[0];
+    const y = (nn + elev) * cl * so - this.ref[1];
+    const z = (nn * (1 - E2) + elev) * sl - this.ref[2];
+    const d = Math.hypot(x, y, z);
+    if (d > this.radius) this.radius = d;
+    buf[o] = x;
+    buf[o + 1] = y;
+    buf[o + 2] = z;
+    // East and north unit vectors of the local tangent frame.
+    buf[o + 3] = -so;
+    buf[o + 4] = co;
+    buf[o + 5] = 0;
+    buf[o + 6] = -sl * co;
+    buf[o + 7] = -sl * so;
+    buf[o + 8] = cl;
+    buf[o + 9] = heading;
+    buf[o + 10] = sx;
+    buf[o + 11] = sy;
+    buf[o + 12] = climb;
+    buf[o + 13] = ((c1 >> 16) & 255) / 255;
+    buf[o + 14] = ((c1 >> 8) & 255) / 255;
+    buf[o + 15] = (c1 & 255) / 255;
+    buf[o + 16] = ((c2 >> 16) & 255) / 255;
+    buf[o + 17] = ((c2 >> 8) & 255) / 255;
+    buf[o + 18] = (c2 & 255) / 255;
+    buf[o + 19] = ((c3 >> 16) & 255) / 255;
+    buf[o + 20] = ((c3 >> 8) & 255) / 255;
+    buf[o + 21] = (c3 & 255) / 255;
     this.counts[mesh] = n + 1;
   }
 
   /** Registers something clickable. `radius` is in CSS pixels. */
   pickable(mx: number, my: number, elev: number, radius: number, ref: unknown): void {
-    this.px.push(mx);
-    this.py.push(my);
-    this.pz.push(elev);
-    this.pr.push(radius);
-    this.pref.push(ref);
+    this.pickPos.push(mx, my, elev);
+    this.pickR.push(radius);
+    this.pickRef.push(ref);
   }
 
   get pickCount(): number {
-    return this.pref.length;
+    return this.pickRef.length;
   }
 
   pickEntry(i: number): [number, number, number, number, unknown] {
-    return [this.px[i], this.py[i], this.pz[i], this.pr[i], this.pref[i]];
+    return [this.pickPos[i * 3], this.pickPos[i * 3 + 1], this.pickPos[i * 3 + 2], this.pickR[i], this.pickRef[i]];
   }
 }
 
-const VERT = `#version 300 es
-precision highp float;
-const float PI = 3.141592653589793;
-// Mapbox's globe is a sphere of this radius in its own units; one metre is GLOBE_R / EARTH_R.
-const float GLOBE_R = 8192.0 / (2.0 * PI);
-const float EARTH_R = 6371008.8;
-uniform mat4 u_rtc;      // flat map: camera matrix * translate(reference point)
-uniform mat4 u_merc;     // camera matrix (absolute mercator)
-uniform mat4 u_globe;    // camera matrix * globe-to-mercator
-uniform float u_t;       // -1: flat map. Otherwise globe, blending toward the flat map as it nears 1.
-uniform vec2 u_ref;
-uniform vec2 u_center;
-uniform float u_ppm;
-uniform float u_night;
+function ecef(lat: number, lon: number, h: number, out: Float64Array, o: number): void {
+  const sl = Math.sin(lat);
+  const cl = Math.cos(lat);
+  const n = A / Math.sqrt(1 - E2 * sl * sl);
+  out[o] = (n + h) * cl * Math.cos(lon);
+  out[o + 1] = (n + h) * cl * Math.sin(lon);
+  out[o + 2] = (n * (1 - E2) + h) * sl;
+}
+
+const VERT = `
 in vec3 a_pos;
 in vec3 a_nrm;
 in float a_part;
-in vec4 i_a;
+in vec3 i_pos;
+in vec3 i_east;
+in vec3 i_north;
 in vec4 i_b;
 in vec3 i_c1;
 in vec3 i_c2;
 in vec3 i_c3;
+uniform float u_night;
 out vec4 v_color;
 
 void main() {
-  float ch = cos(i_a.w), sh = sin(i_a.w);
-  vec3 l = vec3(a_pos.x * i_b.x, a_pos.y * i_b.y, a_pos.z * i_b.x + a_pos.y * i_b.z);
-  vec2 en = vec2(l.x * ch + l.y * sh, -l.x * sh + l.y * ch);
-  vec2 d = vec2(en.x, -en.y) * i_b.w;
-  float elev = i_a.z + l.z;
-  if (u_t < 0.0) {
-    gl_Position = u_rtc * vec4(i_a.xy + d, elev * i_b.w, 1.0);
-  } else {
-    vec2 m = u_ref + i_a.xy;
-    float lon = (m.x * 2.0 - 1.0) * PI;
-    float lat = 2.0 * atan(exp(PI * (1.0 - 2.0 * m.y))) - PI * 0.5;
-    float cl = cos(lat), sl = sin(lat), co = cos(lon), so = sin(lon);
-    vec3 up = vec3(cl * so, -sl, cl * co);
-    vec3 east = vec3(co, 0.0, -so);
-    vec3 north = vec3(-sl * so, -cl, -sl * co);
-    float mu = GLOBE_R / EARTH_R;
-    vec4 g = u_globe * vec4(up * (GLOBE_R + elev * mu) + (east * en.x + north * en.y) * mu, 1.0);
-    if (u_t > 0.0) {
-      vec4 f = vec4(m + d, elev * i_b.w, 1.0);
-      f.xy = (f.xy - u_center) * u_ppm + u_center;
-      f.z *= u_ppm;
-      f = u_merc * f;
-      g = mix(g / g.w, f / f.w, u_t);
-    }
-    gl_Position = g;
-  }
+  float ch = cos(i_b.x), sh = sin(i_b.x);
+  vec3 l = vec3(a_pos.x * i_b.y, a_pos.y * i_b.z, a_pos.z * i_b.y + a_pos.y * i_b.w);
+  float e = l.x * ch + l.y * sh;
+  float n = -l.x * sh + l.y * ch;
+  vec3 up = cross(i_east, i_north);
+  vec3 p = i_pos + i_east * e + i_north * n + up * l.z;
+  gl_Position = czm_modelViewProjection * vec4(p, 1.0);
 
-  vec3 n = vec3(a_nrm.x * ch + a_nrm.y * sh, -a_nrm.x * sh + a_nrm.y * ch, a_nrm.z);
-  // A fixed "studio" light keeps the miniature look readable at any hour.
-  float diff = max(dot(n, normalize(vec3(-0.45, 0.35, 0.82))), 0.0);
-  float light = mix(0.5 + 0.6 * diff, 0.3 + 0.32 * diff, u_night);
+  // Normal turned to the heading, lit by a fixed light in the local frame (the miniature look).
+  vec3 nl = vec3(a_nrm.x * ch + a_nrm.y * sh, -a_nrm.x * sh + a_nrm.y * ch, a_nrm.z);
+  float diff = max(dot(nl, normalize(vec3(-0.45, 0.35, 0.82))), 0.0);
+  float light = mix(0.55 + 0.55 * diff, 0.28 + 0.3 * diff, u_night);
 
   int part = int(a_part + 0.5);
   vec3 c = i_c1;
   float a = 1.0;
   float glow = 0.0;
   if (part == 1) c = i_c2;
-  else if (part == 2) c = vec3(0.13, 0.14, 0.16);
-  else if (part == 3) c = vec3(0.84, 0.85, 0.87);
-  else if (part == 4) { c = mix(vec3(0.2, 0.3, 0.42), vec3(1.0, 0.82, 0.45), u_night); glow = u_night; }
+  else if (part == 2) c = vec3(0.12, 0.13, 0.15);
+  else if (part == 3) c = vec3(0.86, 0.87, 0.89);
+  else if (part == 4) {
+    // Glass: sky reflected on the upward-facing panes, darker on the sides.
+    c = mix(mix(vec3(0.22, 0.3, 0.38), vec3(0.55, 0.66, 0.76), max(nl.z, 0.0)), vec3(1.0, 0.82, 0.45), u_night * 0.85);
+    glow = u_night;
+  }
   else if (part == 5) c = vec3(0.86, 0.68, 0.55);
-  else if (part == 6) { c = vec3(0.0); a = 0.2; light = 1.0; }
+  else if (part == 6) { c = vec3(0.0); a = 0.22; light = 1.0; }
   else if (part == 7) { c = i_c2; a = 0.85; light = 1.0; }
   else if (part == 8) c = i_c3;
-  vec3 rgb = c * mix(light, 1.0, glow);
+  else if (part == 9) { c = vec3(1.0, 0.96, 0.84); glow = u_night; }
+  vec3 rgb = c * mix(light, 1.25, glow);
   v_color = vec4(rgb * a, a);
 }`;
 
-const FRAG = `#version 300 es
-precision mediump float;
+const FRAG = `
 in vec4 v_color;
-out vec4 fragColor;
-void main() { fragColor = v_color; }`;
+void main() { out_FragColor = v_color; }`;
 
-const ATTRS = ['a_pos', 'a_nrm', 'a_part', 'i_a', 'i_b', 'i_c1', 'i_c2', 'i_c3'];
-const UNIFORMS = ['u_rtc', 'u_merc', 'u_globe', 'u_t', 'u_ref', 'u_center', 'u_ppm', 'u_night'];
+const ATTRS = { a_pos: 0, a_nrm: 1, a_part: 2, i_pos: 3, i_east: 4, i_north: 5, i_b: 6, i_c1: 7, i_c2: 8, i_c3: 9 };
 
-/** out = a * b for column-major 4x4 matrices. */
-function mul(a: ArrayLike<number>, b: ArrayLike<number>, out: Float64Array): void {
-  for (let c = 0; c < 4; c++) {
-    for (let r = 0; r < 4; r++) {
-      out[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
-    }
-  }
+interface Slot {
+  vb: unknown;
+  ib: unknown;
+  va: unknown;
+  capacity: number;
+  command: unknown;
 }
 
-export class InstancedLayer implements CustomLayerInterface {
-  readonly id = 'tinyfoot-3d';
-  readonly type = 'custom' as const;
-  readonly renderingMode = '3d' as const;
-
+export class InstancedLayer {
   readonly scene: Scene;
-  /** Frames per second ceiling; lowered on weak devices to save battery. */
+  /** Frames per second ceiling; applied by the world to the render loop. */
   maxFps = 60;
   /** Smoothed frame time in ms, used for adaptive quality. */
   frameMs = 16;
 
-  private map!: MbMap;
-  private gl: WebGL2RenderingContext | null = null;
-  private program: WebGLProgram | null = null;
-  private uni: Record<string, WebGLUniformLocation | null> = {};
-  private vaos: WebGLVertexArrayObject[] = [];
-  private instBufs: WebGLBuffer[] = [];
+  private slots: (Slot | null)[] = [];
+  private program: unknown = null;
+  private opaque: unknown = null;
+  private translucent: unknown = null;
   private last = 0;
-  private timer = 0;
-  private rtc = new Float64Array(16);
-  private globe = new Float64Array(16);
-  private f32 = new Float32Array(16);
-  private isGlobe = true;
-  private listening = false;
+  private night = 0;
+  private readonly modelMatrix = new Matrix4();
+  private readonly bounds = new BoundingSphere();
+  private cesium: CesiumScene | null = null;
+  private readonly tmp = new Cartesian3();
 
   constructor(
     private readonly meshes: MeshDef[],
     private readonly onFrame: (scene: Scene, frame: FrameInfo) => void,
     private readonly nightAt: (lat: number, lon: number, now: number) => number,
+    private readonly view: () => ViewState,
   ) {
     this.scene = new Scene(meshes.length);
-  }
-
-  onAdd(map: MbMap, gl: WebGL2RenderingContext): void {
-    this.map = map;
-    // A style swap removes and re-adds the layer on the same GL context; build GPU resources once.
-    if (this.gl !== gl) this.setup(gl);
-    if (this.listening) return;
-    this.listening = true;
-    map.on('webglcontextrestored', () => {
-      if (this.gl) this.setup(this.gl);
-      map.triggerRepaint();
-    });
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) map.triggerRepaint();
-    });
   }
 
   /** Registers a mesh built after start-up (aircraft types are generated on first sight). Returns its index. */
   addMesh(mesh: MeshDef): number {
     this.meshes.push(mesh);
     this.scene.grow();
-    if (this.gl) this.upload(this.gl, mesh);
     return this.meshes.length - 1;
   }
 
-  private setup(gl: WebGL2RenderingContext): void {
-    this.gl = gl;
-    this.vaos = [];
-    this.instBufs = [];
-    const compile = (type: number, src: string) => {
-      const s = gl.createShader(type)!;
-      gl.shaderSource(s, src);
-      gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error('[tinyfoot] shader', gl.getShaderInfoLog(s));
-      return s;
-    };
-    const program = gl.createProgram()!;
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT));
-    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG));
-    ATTRS.forEach((name, i) => gl.bindAttribLocation(program, i, name));
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) console.error('[tinyfoot] link', gl.getProgramInfoLog(program));
-    this.program = program;
-    for (const name of UNIFORMS) this.uni[name] = gl.getUniformLocation(program, name);
-    for (const mesh of this.meshes) this.upload(gl, mesh);
-  }
-
-  private upload(gl: WebGL2RenderingContext, mesh: MeshDef): void {
-    const vao = gl.createVertexArray()!;
-    gl.bindVertexArray(vao);
-    const vb = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, vb);
-    gl.bufferData(gl.ARRAY_BUFFER, mesh.data, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
-    gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 28, 12);
-    gl.enableVertexAttribArray(2);
-    gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 24);
-    const ib = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, ib);
-    const layout: [number, number, number][] = [[3, 4, 0], [4, 4, 16], [5, 3, 32], [6, 3, 44], [7, 3, 56]];
-    for (const [loc, size, off] of layout) {
-      gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, STRIDE * 4, off);
-      gl.vertexAttribDivisor(loc, 1);
-    }
-    this.vaos.push(vao);
-    this.instBufs.push(ib);
-    gl.bindVertexArray(null);
-    gl.bindBuffer(gl.ARRAY_BUFFER, null);
-  }
-
-  render(
-    gl: WebGL2RenderingContext,
-    matrix: number[],
-    projection?: unknown,
-    globeToMerc?: number[],
-    transition?: number,
-    centerInMercator?: number[],
-    pixelsPerMeterRatio?: number,
-  ): void {
-    const map = this.map;
+  /** Called by Cesium once per frame. */
+  update(frameState: { context: unknown; commandList: unknown[]; passes: { render: boolean; pick: boolean } }): void {
+    if (!frameState.passes.render) return;
+    const context = frameState.context;
     const nowPerf = performance.now();
     const rawDt = this.last ? nowPerf - this.last : 16;
     this.last = nowPerf;
     this.frameMs += (Math.min(rawDt, 250) - this.frameMs) * 0.05;
 
-    const center = map.getCenter();
-    const zoom = map.getZoom();
-    // The globe-only arguments are passed only while the map is still (partly) a globe.
-    this.isGlobe = Boolean(projection && globeToMerc && (transition ?? 1) < 1);
+    const v = this.view();
     const now = Date.now();
-    const frame: FrameInfo = {
-      now,
-      dt: Math.min(rawDt, 100) / 1000,
-      zoom,
-      mpp: (EARTH_C * Math.cos(center.lat * DEG)) / (512 * 2 ** zoom),
-      lat: center.lat,
-      lon: center.lng,
-      globe: this.isGlobe,
-      night: this.nightAt(center.lat, center.lng, now),
-    };
+    this.night = this.nightAt(v.lat, v.lon, now);
+    const frame: FrameInfo = { now, dt: Math.min(rawDt, 100) / 1000, zoom: v.zoom, mpp: v.mpp, lat: v.lat, lon: v.lon, globe: v.globe, night: this.night };
+    const sx = (v.lon + 180) / 360;
+    const sinL = Math.sin(Math.max(-85, Math.min(85, v.lat)) * DEG);
+    const sy = 0.5 - Math.log((1 + sinL) / (1 - sinL)) / (4 * Math.PI);
+    this.scene.begin(v.lat, v.lon, v.height, sx, sy);
+    this.onFrame(this.scene, frame);
 
-    const scene = this.scene;
-    scene.begin(mercX(center.lng), mercY(center.lat));
-    this.onFrame(scene, frame);
+    if (!this.program) this.setup(context);
+    const ref = this.scene.ref;
+    Matrix4.fromTranslation(Cartesian3.fromElements(ref[0], ref[1], ref[2], this.tmp), this.modelMatrix);
+    Cartesian3.fromElements(ref[0], ref[1], ref[2], this.bounds.center);
+    this.bounds.radius = this.scene.radius + 200;
 
-    // Camera-relative matrix: camera * translate(ref), computed in doubles.
-    const r = this.rtc;
-    for (let i = 0; i < 16; i++) r[i] = matrix[i];
-    for (let i = 0; i < 4; i++) r[12 + i] = matrix[i] * scene.refX + matrix[4 + i] * scene.refY + matrix[12 + i];
-
-    if (this.program) {
-      const u = this.uni;
-      gl.useProgram(this.program);
-      this.f32.set(r);
-      gl.uniformMatrix4fv(u.u_rtc, false, this.f32);
-      this.f32.set(matrix);
-      gl.uniformMatrix4fv(u.u_merc, false, this.f32);
-      if (this.isGlobe && globeToMerc) {
-        mul(matrix, globeToMerc, this.globe);
-        this.f32.set(this.globe);
-        gl.uniformMatrix4fv(u.u_globe, false, this.f32);
-        gl.uniform1f(u.u_t, transition ?? 0);
-        gl.uniform2f(u.u_center, centerInMercator?.[0] ?? scene.refX, centerInMercator?.[1] ?? scene.refY);
-        gl.uniform1f(u.u_ppm, pixelsPerMeterRatio ?? 1);
-      } else {
-        gl.uniform1f(u.u_t, -1);
-      }
-      gl.uniform2f(u.u_ref, scene.refX, scene.refY);
-      gl.uniform1f(u.u_night, frame.night);
-
-      gl.enable(gl.DEPTH_TEST);
-      gl.depthFunc(gl.LEQUAL);
-      gl.disable(gl.CULL_FACE);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-      for (const pass of [true, false]) {
-        gl.depthMask(!pass);
-        for (let i = 0; i < this.meshes.length; i++) {
-          const count = scene.counts[i];
-          if (!count || Boolean(this.meshes[i].translucent) !== pass) continue;
-          gl.bindVertexArray(this.vaos[i]);
-          gl.bindBuffer(gl.ARRAY_BUFFER, this.instBufs[i]);
-          gl.bufferData(gl.ARRAY_BUFFER, scene.bufs[i].subarray(0, count * STRIDE), gl.DYNAMIC_DRAW);
-          gl.drawArraysInstanced(gl.TRIANGLES, 0, this.meshes[i].vertexCount, count);
-        }
-      }
-      gl.depthMask(true);
-      gl.bindVertexArray(null);
-      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    for (let i = 0; i < this.meshes.length; i++) {
+      const count = this.scene.counts[i];
+      if (!count) continue;
+      const slot = this.slot(context, i, count);
+      const cmd = slot.command as { instanceCount: number; modelMatrix: Matrix4; boundingVolume: BoundingSphere };
+      (slot.ib as { copyFromArrayView(a: ArrayBufferView, o: number): void }).copyFromArrayView(this.scene.bufs[i].subarray(0, count * STRIDE), 0);
+      cmd.instanceCount = count;
+      cmd.modelMatrix = this.modelMatrix;
+      cmd.boundingVolume = this.bounds;
+      frameState.commandList.push(cmd);
     }
-    this.schedule();
   }
 
-  /** Keeps the animation running, capped at `maxFps`, and paused in background tabs. */
-  private schedule(): void {
-    if (document.hidden) return;
-    if (this.maxFps >= 60) {
-      this.map.triggerRepaint();
-      return;
+  private setup(context: unknown): void {
+    this.program = C.ShaderProgram.fromCache({ context, vertexShaderSource: VERT, fragmentShaderSource: FRAG, attributeLocations: ATTRS });
+    this.opaque = C.RenderState.fromCache({ depthTest: { enabled: true }, depthMask: true, cull: { enabled: false }, blending: Cesium.BlendingState.DISABLED });
+    this.translucent = C.RenderState.fromCache({ depthTest: { enabled: true }, depthMask: false, cull: { enabled: false }, blending: Cesium.BlendingState.PRE_MULTIPLIED_ALPHA_BLEND });
+  }
+
+  /** The GPU buffers for one mesh, grown when it has more instances than room. */
+  private slot(context: unknown, i: number, count: number): Slot {
+    const existing = this.slots[i];
+    if (existing && existing.capacity >= count) return existing;
+    if (existing) {
+      (existing.va as { destroy(): void }).destroy();
     }
-    if (this.timer) return;
-    this.timer = window.setTimeout(() => {
-      this.timer = 0;
-      this.map.triggerRepaint();
-    }, 1000 / this.maxFps);
+    const mesh = this.meshes[i];
+    const capacity = Math.max(64, 2 ** Math.ceil(Math.log2(count)));
+    const vb = existing?.vb ?? C.Buffer.createVertexBuffer({ context, typedArray: mesh.data, usage: C.BufferUsage.STATIC_DRAW });
+    // The model's vertices outlive the vertex array, which is rebuilt whenever the instance buffer grows.
+    (vb as { vertexArrayDestroyable: boolean }).vertexArrayDestroyable = false;
+    const ib = C.Buffer.createVertexBuffer({ context, sizeInBytes: capacity * STRIDE * 4, usage: C.BufferUsage.DYNAMIC_DRAW });
+    const F = Cesium.ComponentDatatype.FLOAT;
+    const per = (index: number, size: number, offset: number) => ({ index, vertexBuffer: ib, componentsPerAttribute: size, componentDatatype: F, offsetInBytes: offset * 4, strideInBytes: STRIDE * 4, instanceDivisor: 1 });
+    const va = new C.VertexArray({
+      context,
+      attributes: [
+        { index: 0, vertexBuffer: vb, componentsPerAttribute: 3, componentDatatype: F, offsetInBytes: 0, strideInBytes: 28 },
+        { index: 1, vertexBuffer: vb, componentsPerAttribute: 3, componentDatatype: F, offsetInBytes: 12, strideInBytes: 28 },
+        { index: 2, vertexBuffer: vb, componentsPerAttribute: 1, componentDatatype: F, offsetInBytes: 24, strideInBytes: 28 },
+        per(3, 3, 0),
+        per(4, 3, 3),
+        per(5, 3, 6),
+        per(6, 4, 9),
+        per(7, 3, 13),
+        per(8, 3, 16),
+        per(9, 3, 19),
+      ],
+    });
+    const command = new C.DrawCommand({
+      owner: this,
+      primitiveType: Cesium.PrimitiveType.TRIANGLES,
+      vertexArray: va,
+      count: mesh.vertexCount,
+      shaderProgram: this.program,
+      renderState: mesh.translucent ? this.translucent : this.opaque,
+      pass: mesh.translucent ? C.Pass.TRANSLUCENT : C.Pass.OPAQUE,
+      uniformMap: { u_night: () => this.night },
+      instanceCount: 0,
+    });
+    const slot: Slot = { vb, ib, va, capacity, command };
+    this.slots[i] = slot;
+    return slot;
+  }
+
+  attach(scene: CesiumScene): void {
+    this.cesium = scene;
+    scene.primitives.add(this);
+  }
+
+  isDestroyed(): boolean {
+    return false;
+  }
+
+  destroy(): void {
+    /* lives as long as the page */
   }
 
   /** Finds the closest clickable thing to a point given in CSS pixels. */
   pick(x: number, y: number): unknown {
     const scene = this.scene;
-    const canvas = this.map.getCanvas();
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
-    const r = this.rtc;
+    const cs = this.cesium;
+    if (!cs) return null;
     let best: unknown = null;
     let bestScore = Infinity;
+    const p = new Cartesian3();
+    const out = new Cesium.Cartesian2();
+    const camPos = cs.camera.positionWC;
     for (let i = 0; i < scene.pickCount; i++) {
       const [mx, my, elev, radius, ref] = scene.pickEntry(i);
-      let sx: number;
-      let sy: number;
-      if (this.isGlobe) {
-        // On the globe, fall back to the ground point under the object.
-        const lng = mx * 360 - 180;
-        const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * my))) / DEG;
-        const c = this.map.getCenter();
-        const cosd = Math.sin(lat * DEG) * Math.sin(c.lat * DEG) + Math.cos(lat * DEG) * Math.cos(c.lat * DEG) * Math.cos((lng - c.lng) * DEG);
-        if (cosd < 0.15) continue; // far side
-        const p = this.map.project([lng, lat]);
-        sx = p.x;
-        sy = p.y;
-      } else {
-        let rx = mx - scene.refX;
-        if (rx > 0.5) rx -= 1;
-        else if (rx < -0.5) rx += 1;
-        const ry = my - scene.refY;
-        const ez = elev * mercScale(my);
-        const cw = r[3] * rx + r[7] * ry + r[11] * ez + r[15];
-        if (cw <= 0) continue;
-        sx = ((r[0] * rx + r[4] * ry + r[8] * ez + r[12]) / cw * 0.5 + 0.5) * w;
-        sy = (0.5 - (r[1] * rx + r[5] * ry + r[9] * ez + r[13]) / cw * 0.5) * h;
-      }
-      const dist = Math.hypot(sx - x, sy - y);
-      if (dist <= radius && dist / radius < bestScore) {
-        bestScore = dist / radius;
+      const lon = mx * 360 - 180;
+      const lat = latFromMerc(my);
+      Cartesian3.fromDegrees(lon, lat, elev, undefined, p);
+      // Skip things on the far side of the planet.
+      if (Cartesian3.dot(p, Cartesian3.subtract(camPos, p, this.tmp)) < 0 && Cartesian3.magnitude(camPos) > 7.5e6) continue;
+      const w = SceneTransforms.worldToWindowCoordinates(cs, p, out);
+      if (!w) continue;
+      const d = Math.hypot(w.x - x, w.y - y);
+      if (d <= radius && d / radius < bestScore) {
+        bestScore = d / radius;
         best = ref;
       }
     }
+    void mercScale;
     return best;
   }
 }

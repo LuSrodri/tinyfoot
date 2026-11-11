@@ -325,7 +325,7 @@ export class TransitLayer implements Layer {
       m.step(frame.now, frame.dt, v.feed.ttl * 1.5, 1.5);
       const rail = v.mode === 'train' || v.mode === 'metro';
       const mesh = rail ? M.Train : v.mode === 'tram' ? M.Tram : v.mode === 'ferry' ? M.Ferry : M.Bus;
-      const len = rail ? 98 : v.mode === 'tram' ? 30.6 : v.mode === 'ferry' ? 100 : 12;
+      const len = rail ? 98.1 : v.mode === 'tram' ? 26 : v.mode === 'ferry' ? 100 : 12;
       const real = v.mode === 'ferry' ? 0.4 : v.mode === 'metro' ? 0.8 : 1;
       const minPx = frame.zoom >= 15 ? 0 : rail ? (far ? 12 : 16) : v.mode === 'bus' ? (far ? 5 : 8) : far ? 8 : 12;
       const scale = Math.max(real, (minPx * frame.mpp) / len);
@@ -335,7 +335,7 @@ export class TransitLayer implements Layer {
       }
       const mx = mercX(m.lon);
       const my = mercY(m.lat);
-      scene.add(mesh, mx, my, v.elev, m.heading * DEG, scale, scale, 0, v.c1, v.c2);
+      scene.add(mesh, mx, my, v.elev, m.heading * DEG, scale, scale, 0, v.c1, v.c2, 0x3b4048);
       scene.pickable(mx, my, v.elev + 2 * scale, Math.max(13, minPx * 0.7), v);
     }
   }

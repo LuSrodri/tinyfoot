@@ -4,11 +4,13 @@
 // along the real street geometry, with density and speed estimated from the
 // local time of day, the day of the week and the class of each street.
 
-import type { Map as MlMap } from 'mapbox-gl';
-import { viewBounds, type Ctx, type Layer, type LayerState } from '../core';
+import { type Ctx, type Layer, type LayerState } from '../core';
+import { registerMesh } from '../data/aircraftTypes';
+import { cachedMesh } from '../gl/meshcache';
+import type { WorldMap } from '../world/world';
 import type { FrameInfo, Scene } from '../gl/instanced';
-import { M } from '../gl/meshes';
-import { hsl, mercScale, mercX, mercY, mulberry, solarHour } from '../util/geo';
+import { M, buildCar, type BodyType } from '../gl/meshes';
+import { DEG, hash, hsl, mercScale, mercX, mercY, mulberry, solarHour } from '../util/geo';
 import { t } from '../util/i18n';
 
 const enum Cls {
@@ -22,20 +24,6 @@ const enum Cls {
   Path,
 }
 
-const CLASS: Record<string, Cls> = {
-  motorway: Cls.Motorway,
-  trunk: Cls.Trunk,
-  primary: Cls.Primary,
-  secondary: Cls.Secondary,
-  tertiary: Cls.Tertiary,
-  // Mapbox Streets names for the same things.
-  street: Cls.Minor,
-  street_limited: Cls.Minor,
-  minor: Cls.Minor,
-  service: Cls.Service,
-  path: Cls.Path,
-  pedestrian: Cls.Path,
-};
 
 // Per class: cars per km per direction at peak, free-flow speed (m/s),
 // half-width of the carriageway (m), pedestrians per km at peak.
@@ -55,6 +43,41 @@ interface Road {
   oneway: boolean;
   startNode: string;
   endNode: string;
+  /** Height of the deck above its banks, in metres (0 for a road on the ground). */
+  lift: number;
+  /** Whether the road climbs from / descends to the ground at its start and end. */
+  rampA: boolean;
+  rampB: boolean;
+  /** Elevation of the banks; found the first time it is needed. */
+  baseZ: number;
+  /** Piers as [mercX, mercY, groundZ, heading] quads; built lazily. */
+  piers: Float64Array | null;
+}
+
+const smooth = (v: number): number => {
+  const c = Math.max(0, Math.min(1, v));
+  return c * c * (3 - 2 * c);
+};
+
+/** How far above its banks the deck is, `s` metres along the road. */
+function liftAt(r: Road, s: number): number {
+  if (!r.lift) return 0;
+  const ramp = Math.min(70, r.len * 0.45);
+  let f = 1;
+  if (r.rampA) f = Math.min(f, smooth(s / ramp));
+  if (r.rampB) f = Math.min(f, smooth((r.len - s) / ramp));
+  return r.lift * f;
+}
+
+const latOf = (my: number): number => Math.atan(Math.sinh(Math.PI * (1 - 2 * my))) * (180 / Math.PI);
+
+/** Absolute elevation of a bridge deck. A bridge stays level between its banks instead of following the valley. */
+function bridgeZ(ctx: Ctx, r: Road, s: number): number {
+  if (Number.isNaN(r.baseZ)) {
+    const n = r.x.length - 1;
+    r.baseZ = Math.max(ctx.elevAt(latOf(r.y[0]), r.x[0] * 360 - 180), ctx.elevAt(latOf(r.y[n]), r.x[n] * 360 - 180));
+  }
+  return r.baseZ + liftAt(r, s);
 }
 
 const bump = (h: number, mid: number, sd: number): number => {
@@ -92,7 +115,25 @@ const LEFT_HAND: [number, number, number, number][] = [
 ];
 const drivesLeft = (lat: number, lon: number): boolean => LEFT_HAND.some((b) => lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3]);
 
-/** The street network currently on screen, read from the map's own vector tiles. */
+/** OpenStreetMap highway values mapped to the simulation's street classes. */
+const OSM_CLASS: Record<string, Cls> = {
+  motorway: Cls.Motorway, motorway_link: Cls.Motorway, trunk: Cls.Trunk, trunk_link: Cls.Trunk,
+  primary: Cls.Primary, primary_link: Cls.Primary, secondary: Cls.Secondary, secondary_link: Cls.Secondary,
+  tertiary: Cls.Tertiary, tertiary_link: Cls.Tertiary, unclassified: Cls.Minor, residential: Cls.Minor,
+  living_street: Cls.Minor, service: Cls.Service, pedestrian: Cls.Path, footway: Cls.Path, path: Cls.Path, steps: Cls.Path,
+};
+
+interface OsmWay {
+  type: string;
+  id: number;
+  nodes: number[];
+  geometry: { lat: number; lon: number }[];
+  tags?: Record<string, string>;
+}
+
+const TILE_Z = 15;
+
+/** The street network around the view, from OpenStreetMap (one z15 tile at a time, cached by the server). */
 export class RoadNet {
   roads: Road[] = [];
   nodes = new Map<string, number[]>();
@@ -100,77 +141,118 @@ export class RoadNet {
   left = false;
   private dirty = true;
   private timer = 0;
+  private tiles = new Map<string, OsmWay[] | 'loading' | 'failed'>();
+  private loaded = '';
 
-  constructor(private readonly map: MlMap, private readonly sourceId: () => string | null) {
+  constructor(private readonly map: WorldMap) {
     const mark = () => {
       window.clearTimeout(this.timer);
-      this.timer = window.setTimeout(() => (this.dirty = true), 350);
+      this.timer = window.setTimeout(() => (this.dirty = true), 300);
     };
     map.on('moveend', mark);
-    map.on('sourcedata', (e) => {
-      if (e.isSourceLoaded && e.sourceId === this.sourceId()) mark();
-    });
+  }
+
+  /** z15 tiles covering the view, nearest to the centre first (at most four). */
+  private wanted(): [number, number][] {
+    const b = this.map.getBounds();
+    const c = this.map.getCenter();
+    const n = 2 ** TILE_Z;
+    const tx = (lon: number) => Math.floor(((lon + 180) / 360) * n);
+    const ty = (lat: number) => Math.floor(((1 - Math.log(Math.tan(lat * DEG) + 1 / Math.cos(lat * DEG)) / Math.PI) / 2) * n);
+    const cx = tx(c.lng), cy = ty(c.lat);
+    const list: [number, number, number][] = [];
+    for (let x = tx(b.getWest()); x <= tx(b.getEast()); x++) {
+      for (let y = ty(b.getNorth()); y <= ty(b.getSouth()); y++) list.push([x, y, Math.hypot(x - cx, y - cy)]);
+    }
+    return list.sort((a, d) => a[2] - d[2]).slice(0, 4).map(([x, y]) => [x, y]);
+  }
+
+  private fetchTile(x: number, y: number): void {
+    const key = `${x}/${y}`;
+    this.tiles.set(key, 'loading');
+    void fetch(`/api/roads?x=${x}&y=${y}`, { signal: AbortSignal.timeout(30000) })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((j: { elements?: OsmWay[] }) => {
+        this.tiles.set(key, (j.elements ?? []).filter((e) => e.type === 'way' && e.geometry?.length > 1));
+        this.dirty = true;
+      })
+      .catch(() => {
+        this.tiles.set(key, 'failed');
+        // Allow another try later.
+        window.setTimeout(() => this.tiles.delete(key), 30000);
+      });
   }
 
   /** Rebuilds if the view changed. Cheap to call every frame. */
   refresh(zoom: number): void {
     if (!this.dirty) return;
     this.dirty = false;
-    const src = this.sourceId();
-    if (zoom < 14.9 || !src) {
+    if (zoom < 14.9) {
       if (this.roads.length) {
         this.roads = [];
         this.nodes.clear();
+        this.loaded = '';
         this.version++;
       }
       return;
     }
-    let feats: ReturnType<MlMap['querySourceFeatures']>;
-    try {
-      feats = this.map.querySourceFeatures(src, { sourceLayer: 'road' });
-    } catch {
-      return;
+    const want = this.wanted();
+    let pending = false;
+    for (const [x, y] of want) {
+      const t = this.tiles.get(`${x}/${y}`);
+      if (t === undefined) {
+        if (![...this.tiles.values()].includes('loading')) this.fetchTile(x, y);
+        pending = true;
+      } else if (t === 'loading') pending = true;
     }
-    const b = viewBounds(this.map, 0.12);
+    if (pending) {
+      window.clearTimeout(this.timer);
+      this.timer = window.setTimeout(() => (this.dirty = true), 400);
+    }
+    const ready = want.map(([x, y]) => `${x}/${y}`).filter((k) => Array.isArray(this.tiles.get(k)));
+    const signature = ready.join('|');
+    if (!ready.length || signature === this.loaded) return;
+    this.loaded = signature;
+    // Forget far-away tiles.
+    if (this.tiles.size > 24) for (const k of [...this.tiles.keys()].slice(0, this.tiles.size - 24)) this.tiles.delete(k);
+
+    // Ways from all ready tiles, each once.
+    const ways = new Map<number, OsmWay>();
+    for (const k of ready) for (const w of this.tiles.get(k) as OsmWay[]) ways.set(w.id, w);
+    // Split ways where they meet other ways, so that agents can turn at every junction.
+    const uses = new Map<number, number>();
+    for (const w of ways.values()) for (const id of w.nodes) uses.set(id, (uses.get(id) ?? 0) + 1);
+
     const roads: Road[] = [];
-    const seen = new Set<string>();
-    const node = (lon: number, lat: number) => `${lon.toFixed(5)},${lat.toFixed(5)}`;
-    for (const f of feats) {
-      const p = (f.properties ?? {}) as { class?: string; structure?: string; oneway?: string | boolean; type?: string };
-      const cls = CLASS[p.class ?? ''];
-      if (cls === undefined || p.structure === 'tunnel') continue;
-      if (cls === Cls.Path && p.type && /cycleway|bridleway/.test(p.type)) continue;
-      const g = f.geometry;
-      const lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : [];
-      for (const line of lines) {
-        if (line.length < 2) continue;
-        let minX = 180, maxX = -180, minY = 90, maxY = -90;
-        for (const c of line) {
-          if (c[0] < minX) minX = c[0];
-          if (c[0] > maxX) maxX = c[0];
-          if (c[1] < minY) minY = c[1];
-          if (c[1] > maxY) maxY = c[1];
-        }
-        if (maxX < b[0] || minX > b[2] || maxY < b[1] || minY > b[3]) continue;
-        const a = line[0];
-        const z = line[line.length - 1];
-        const startNode = node(a[0], a[1]);
-        const endNode = node(z[0], z[1]);
-        const key = `${cls}|${startNode}|${endNode}|${line.length}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const n = line.length;
+    for (const w of ways.values()) {
+      const tags = w.tags ?? {};
+      const cls = OSM_CLASS[tags.highway ?? ''];
+      if (cls === undefined || tags.tunnel === 'yes' || tags.tunnel === 'building_passage' || tags.area === 'yes') continue;
+      const reverse = tags.oneway === '-1';
+      const oneway = reverse || tags.oneway === 'yes' || tags.oneway === '1' || tags.junction === 'roundabout' || cls === Cls.Motorway;
+      const bridge = tags.bridge !== undefined && tags.bridge !== 'no';
+      const lift = bridge ? 6.5 + 5.5 * Math.max(0, (Number(tags.layer) || 1) - 1) : 0;
+      let pts = w.geometry.map((g, i) => ({ lat: g.lat, lon: g.lon, id: w.nodes[i] }));
+      if (reverse) pts = pts.reverse();
+      let start = 0;
+      for (let i = 1; i < pts.length; i++) {
+        if (i < pts.length - 1 && (uses.get(pts[i].id) ?? 0) < 2) continue;
+        const part = pts.slice(start, i + 1);
+        start = i;
+        const n = part.length;
         const x = new Float64Array(n);
         const y = new Float64Array(n);
         const cum = new Float32Array(n);
-        for (let i = 0; i < n; i++) {
-          x[i] = mercX(line[i][0]);
-          y[i] = mercY(line[i][1]);
-          if (i) cum[i] = cum[i - 1] + Math.hypot(x[i] - x[i - 1], y[i] - y[i - 1]) / mercScale(y[i]);
+        for (let k = 0; k < n; k++) {
+          x[k] = mercX(part[k].lon);
+          y[k] = mercY(part[k].lat);
+          if (k) cum[k] = cum[k - 1] + Math.hypot(x[k] - x[k - 1], y[k] - y[k - 1]) / mercScale(y[k]);
         }
         const len = cum[n - 1];
-        if (len < 4) continue;
-        roads.push({ key, x, y, cum, len, cls, oneway: p.oneway === 'true' || p.oneway === true || cls === Cls.Motorway, startNode, endNode });
+        if (len < 3) continue;
+        const startNode = String(part[0].id);
+        const endNode = String(part[n - 1].id);
+        roads.push({ key: `${w.id}:${startNode}:${endNode}`, x, y, cum, len, cls, oneway, startNode, endNode, lift, rampA: true, rampB: true, baseZ: NaN, piers: null });
       }
     }
     const nodes = new Map<string, number[]>();
@@ -181,11 +263,31 @@ export class RoadNet {
         else nodes.set(k, [i]);
       }
     });
+    // A bridge only ramps down where it does not continue as another bridge piece.
+    for (const road of roads) {
+      if (!road.lift) continue;
+      const continues = (k: string) => (nodes.get(k) ?? []).some((j) => roads[j] !== road && roads[j].lift > 0);
+      road.rampA = !continues(road.startNode);
+      road.rampB = !continues(road.endNode);
+    }
     this.roads = roads;
     this.nodes = nodes;
     const c = this.map.getCenter();
     this.left = drivesLeft(c.lat, c.lng);
     this.version++;
+  }
+
+  /** A few points along main roads (open sky), for matching heights to the photographed surface. */
+  probes(): [number, number][] {
+    const out: [number, number][] = [];
+    for (const r of this.roads) {
+      if (r.cls > Cls.Tertiary || r.lift) continue;
+      const k = Math.floor(r.x.length / 2);
+      out.push([Math.atan(Math.sinh(Math.PI * (1 - 2 * r.y[k]))) / DEG, r.x[k] * 360 - 180]);
+      if (out.length >= 60) break;
+    }
+    // Shuffle so successive calibrations look at different streets.
+    return out.sort(() => Math.random() - 0.5);
   }
 }
 
@@ -215,6 +317,8 @@ abstract class Agents implements Layer {
   protected demand = 0;
   protected checked = 0;
   protected readonly rnd = mulberry(0x51f15e);
+  /** Extra height of the agent being drawn, when it is on a bridge. */
+  protected liftNow = 0;
 
   constructor(protected readonly ctx: Ctx, protected readonly net: RoadNet) {}
 
@@ -364,6 +468,7 @@ abstract class Agents implements Layer {
         const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * my))) * (180 / Math.PI);
         this.elev[i] = this.ctx.elevAt(lat, mx * 360 - 180);
       }
+      this.liftNow = r.lift ? bridgeZ(this.ctx, r, s) - this.elev[i] : 0;
       this.draw(scene, frame, i, mx, my, heading);
     }
   }
@@ -415,17 +520,16 @@ const REGIONS: [string, number, number, number, number][] = [
 
 interface Model {
   name: string;
-  mesh: M;
-  /** Scale across/up and along, relative to the reference mesh of its body type. */
+  /** Index of the mesh; generated (and cached) the first time the model is needed. */
+  mesh: number;
+  /** Scale across/up and along the mesh (1 for generated cars, which are built to size). */
   sx: number;
   sy: number;
   moto: boolean;
 }
 
-// Reference size (length, width) of each body-type mesh.
-const BODY: Record<string, [M, number, number]> = {
-  H: [M.Car, 4.05, 1.75], S: [M.Sedan, 4.65, 1.8], U: [M.Suv, 4.5, 1.85], P: [M.Pickup, 5.35, 1.9], V: [M.Van, 5, 1.95], K: [M.Kei, 3.4, 1.48], M: [M.Moto, 2.1, 0.74],
-};
+/** Battery-electric models: a closed front, no grille. */
+const ELECTRIC = /Tesla|BYD|Mini EV|Seagull/;
 
 const fleets = new Map<string, { models: Model[]; cum: number[] }>();
 function fleetFor(lat: number, lon: number): { models: Model[]; cum: number[] } {
@@ -436,9 +540,13 @@ function fleetFor(lat: number, lon: number): { models: Model[]; cum: number[] } 
     const cum: number[] = [];
     let total = 0;
     for (const row of FLEETS[code].split(';')) {
-      const [name, body, len, w, , share] = row.split('|');
-      const [mesh, refLen, refW] = BODY[body];
-      models.push({ name, mesh, sx: Number(w) / refW, sy: Number(len) / refLen, moto: body === 'M' });
+      const [name, body, len, w, h, share] = row.split('|');
+      if (body === 'M') {
+        models.push({ name, mesh: M.Moto, sx: Number(w) / 0.74, sy: Number(len) / 2.1, moto: true });
+      } else {
+        const spec = { len: Number(len), w: Number(w), h: Number(h), body: body as BodyType, seed: (hash(name) % 1000) / 1000, electric: ELECTRIC.test(name) };
+        models.push({ name, mesh: registerMesh(cachedMesh(`car:${name}:${len}`, () => buildCar(spec))), sx: 1, sy: 1, moto: false });
+      }
       total += Number(share);
       cum.push(total);
     }
@@ -455,12 +563,50 @@ const TROUSERS = [0x1f2a44, 0x2b2b2e, 0x3d4a5c, 0x6b6257, 0x8d8371, 0x202020, 0x
 
 export class TrafficLayer extends Agents {
   readonly id = 'traffic';
-  protected readonly minZoom = 15;
+  protected readonly minZoom = 15.5;
   private fleet = fleetFor(0, 0);
   private models: Model[] = [];
 
   protected cap(): number {
     return 1600;
+  }
+
+  /** Viaducts and bridges: an elevated deck on piers, so traffic passes over and under. */
+  override emit(scene: Scene, frame: FrameInfo): void {
+    super.emit(scene, frame);
+    if (!this.enabled || frame.zoom < this.minZoom) return;
+    let budget = 900;
+    for (const r of this.net.roads) {
+      if (!r.lift || r.cls === Cls.Path) continue;
+      const width = HALF_WIDTH[r.cls] * 2 + 2.5;
+      const n = r.x.length;
+      for (let i = 0; i < n - 1 && budget > 0; i++, budget--) {
+        const dx = r.x[i + 1] - r.x[i];
+        const dy = r.y[i + 1] - r.y[i];
+        const z0 = bridgeZ(this.ctx, r, r.cum[i]);
+        const z1 = bridgeZ(this.ctx, r, r.cum[i + 1]);
+        scene.add(M.Deck, r.x[i], r.y[i], z0 - 0.05, Math.atan2(dx, -dy), width, r.cum[i + 1] - r.cum[i] + 0.3, z1 - z0, 0, 0);
+      }
+      if (!r.piers) {
+        // A pier every 30 m or so, wherever the deck is well clear of the ground.
+        const list: number[] = [];
+        for (let s = 15; s < r.len - 5; s += 30) {
+          if (liftAt(r, s) < 3.5) continue;
+          let k = 0;
+          while (k < n - 2 && r.cum[k + 1] < s) k++;
+          const f = (s - r.cum[k]) / Math.max(1e-6, r.cum[k + 1] - r.cum[k]);
+          const px = r.x[k] + (r.x[k + 1] - r.x[k]) * f;
+          const py = r.y[k] + (r.y[k + 1] - r.y[k]) * f;
+          list.push(px, py, this.ctx.elevAt(latOf(py), px * 360 - 180), Math.atan2(r.x[k + 1] - r.x[k], -(r.y[k + 1] - r.y[k])), s);
+        }
+        r.piers = new Float64Array(list);
+      }
+      for (let k = 0; k + 4 < r.piers.length + 1 && k < r.piers.length; k += 5) {
+        const ground = r.piers[k + 2];
+        const height = bridgeZ(this.ctx, r, r.piers[k + 4]) - 0.9 - ground;
+        if (height > 2) scene.add(M.Pier, r.piers[k], r.piers[k + 1], ground, r.piers[k + 3] + Math.PI / 2, height, width * 0.55, 0, 0, 0);
+      }
+    }
   }
   protected perKm(cls: Cls): number {
     return CARS[cls];
@@ -507,14 +653,14 @@ export class TrafficLayer extends Agents {
   protected draw(scene: Scene, _frame: FrameInfo, i: number, mx: number, my: number, heading: number): void {
     // Always real size: a four-metre car on a real-width street.
     const model = this.models[i];
-    if (!model) scene.add(M.Truck, mx, my, this.elev[i], heading, 1, 1, 0, this.color[i], 0xb3261e);
-    else scene.add(model.mesh, mx, my, this.elev[i], heading, model.sx, model.sy, 0, this.color[i], this.col2[i], this.col3[i]);
+    if (!model) scene.add(M.Truck, mx, my, this.elev[i] + this.liftNow, heading, 1, 1, 0, this.color[i], 0xb3261e);
+    else scene.add(model.mesh, mx, my, this.elev[i] + this.liftNow, heading, model.sx, model.sy, 0, this.color[i], this.col2[i], this.col3[i]);
   }
 }
 
 export class PeopleLayer extends Agents {
   readonly id = 'people';
-  protected readonly minZoom = 16.3;
+  protected readonly minZoom = 16.8;
   private height = new Float32Array(0);
 
   protected cap(): number {
@@ -557,6 +703,6 @@ export class PeopleLayer extends Agents {
   }
   protected draw(scene: Scene, _frame: FrameInfo, i: number, mx: number, my: number, heading: number): void {
     const h = this.height[i] || 1;
-    scene.add(M.Person, mx, my, this.elev[i], heading, h, h, 0, this.color[i], this.col2[i], this.col3[i]);
+    scene.add(M.Person, mx, my, this.elev[i] + this.liftNow, heading, h, h, 0, this.color[i], this.col2[i], this.col3[i]);
   }
 }

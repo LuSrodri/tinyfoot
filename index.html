@@ -4,22 +4,19 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>tinyfoot — the planet in miniature, live</title>
-    <meta name="description" content="A live, tilt-shift 3D miniature of the whole planet: real aircraft, satellites, ships, trains and buses moving in real time over real terrain and buildings." />
+    <meta name="description" content="A live, tilt-shift 3D miniature of the whole planet: real aircraft, satellites, ships, trains and buses moving in real time over photorealistic 3D cities." />
     <meta name="theme-color" content="#0f1720" />
     <meta property="og:title" content="tinyfoot" />
     <meta property="og:description" content="The planet in miniature, live." />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preconnect" href="https://api.mapbox.com" crossorigin />
+    <link rel="preconnect" href="https://tile.googleapis.com" crossorigin />
+    <link rel="preconnect" href="https://api.cesium.com" crossorigin />
     <link rel="preconnect" href="https://gibs.earthdata.nasa.gov" crossorigin />
   </head>
   <body>
     <div id="map" aria-label="Map"></div>
 
-    <div id="tiltshift" aria-hidden="true">
-      <div class="band top"><i></i><i></i><i></i></div>
-      <div class="band bottom"><i></i><i></i><i></i></div>
-      <div class="vignette"></div>
-    </div>
+    <div id="minimap" aria-hidden="true"></div>
 
     <header id="top">
       <div class="brand" title="tinyfoot">
@@ -61,7 +58,8 @@
       </label>
       <p class="credits">
         Map © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> ·
-        <a href="https://www.mapbox.com/about/maps/" target="_blank" rel="noopener">Mapbox</a> ·
+        <a href="https://cesium.com/platform/cesium-ion/" target="_blank" rel="noopener">Cesium ion</a> ·
+        <a href="https://developers.google.com/maps/documentation/tile/3d-tiles" target="_blank" rel="noopener">Google 3D Tiles</a> ·
         <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noopener">NASA GIBS</a> ·
         <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a> ·
         <a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol</a> ·

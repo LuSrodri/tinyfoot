@@ -1,7 +1,18 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
+import { viteStaticCopy } from 'vite-plugin-static-copy';
+
+// CesiumJS loads its web workers, shaders' assets and third-party code at runtime from this path.
+const cesiumSource = 'node_modules/cesium/Build/Cesium';
+const cesiumBaseUrl = 'cesium';
 
 export default defineConfig({
+  define: { CESIUM_BASE_URL: JSON.stringify(`/${cesiumBaseUrl}`) },
+  plugins: [
+    viteStaticCopy({
+      targets: ['ThirdParty', 'Workers', 'Assets', 'Widgets'].map((dir) => ({ src: `${cesiumSource}/${dir}`, dest: cesiumBaseUrl })),
+    }),
+  ],
   resolve: {
     alias: {
       // satellite.js' main entry also pulls in a multi-threaded WASM build we do not need;
@@ -17,6 +28,6 @@ export default defineConfig({
   build: {
     target: 'es2022',
     sourcemap: false,
-    chunkSizeWarningLimit: 1200,
+    chunkSizeWarningLimit: 6000,
   },
 });

@@ -2,7 +2,7 @@
 // rain and snow falling, fog closing in, and the wind direction they come from.
 
 import { getJson } from '../core';
-import type { Basemap, Weather } from '../map/basemap';
+import type { Weather, World } from '../world/world';
 import { haversine } from '../util/geo';
 
 interface Current {
@@ -27,15 +27,15 @@ export class WeatherWatch {
   private at = 0;
   private busy = false;
 
-  constructor(private readonly base: Basemap) {
+  constructor(private readonly base: World) {
     // Precipitation is only drawn up close, so re-evaluate whenever the camera settles.
-    base.map.on('moveend', () => base.setWeather(this.current));
+    base.on('moveend', () => base.setWeather(this.current));
   }
 
   /** Call often; it only fetches when the view moved 15 km or ten minutes passed. */
   tick(now: number): void {
-    const c = this.base.map.getCenter();
-    if (this.busy || this.base.map.getZoom() < 6) return;
+    const c = this.base.getCenter();
+    if (this.busy || this.base.getZoom() < 6) return;
     const moved = this.lat > 90 || haversine(this.lat, this.lon, c.lat, c.lng) > 15000;
     if (!moved && now - this.at < 600000) return;
     this.busy = true;
