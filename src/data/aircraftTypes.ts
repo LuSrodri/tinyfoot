@@ -1,4 +1,5 @@
 import { M, buildAirframe, type AirframeSpec, type MeshDef } from '../gl/meshes';
+import { cachedMesh } from '../gl/meshcache';
 import { hash, hsl } from '../util/geo';
 
 // ICAO type designator | marketing name | airframe family | length in metres.
@@ -306,7 +307,7 @@ function make(code: string, name: string, fam: Fam, length: number): TypeInfo {
     length,
     scale: 1,
     mesh: () => {
-      if (index < 0) index = register(buildAirframe(specFor(code, fam, length)));
+      if (index < 0) index = register(cachedMesh(`air:${code}:${length}`, () => buildAirframe(specFor(code, fam, length))));
       return index;
     },
   };

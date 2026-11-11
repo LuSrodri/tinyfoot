@@ -4,7 +4,7 @@
 // along the real street geometry, with density and speed estimated from the
 // local time of day, the day of the week and the class of each street.
 
-import type { Map as MlMap } from 'maplibre-gl';
+import type { Map as MlMap } from 'mapbox-gl';
 import { viewBounds, type Ctx, type Layer, type LayerState } from '../core';
 import type { FrameInfo, Scene } from '../gl/instanced';
 import { M } from '../gl/meshes';
@@ -28,9 +28,13 @@ const CLASS: Record<string, Cls> = {
   primary: Cls.Primary,
   secondary: Cls.Secondary,
   tertiary: Cls.Tertiary,
+  // Mapbox Streets names for the same things.
+  street: Cls.Minor,
+  street_limited: Cls.Minor,
   minor: Cls.Minor,
   service: Cls.Service,
   path: Cls.Path,
+  pedestrian: Cls.Path,
 };
 
 // Per class: cars per km per direction at peak, free-flow speed (m/s),
@@ -123,7 +127,7 @@ export class RoadNet {
     }
     let feats: ReturnType<MlMap['querySourceFeatures']>;
     try {
-      feats = this.map.querySourceFeatures(src, { sourceLayer: 'transportation' });
+      feats = this.map.querySourceFeatures(src, { sourceLayer: 'road' });
     } catch {
       return;
     }
@@ -132,10 +136,10 @@ export class RoadNet {
     const seen = new Set<string>();
     const node = (lon: number, lat: number) => `${lon.toFixed(5)},${lat.toFixed(5)}`;
     for (const f of feats) {
-      const p = f.properties as { class?: string; brunnel?: string; oneway?: number; subclass?: string; access?: string };
+      const p = (f.properties ?? {}) as { class?: string; structure?: string; oneway?: string | boolean; type?: string };
       const cls = CLASS[p.class ?? ''];
-      if (cls === undefined || p.brunnel === 'tunnel') continue;
-      if (cls === Cls.Path && p.subclass && !/footway|pedestrian|path|steps/.test(p.subclass)) continue;
+      if (cls === undefined || p.structure === 'tunnel') continue;
+      if (cls === Cls.Path && p.type && /cycleway|bridleway/.test(p.type)) continue;
       const g = f.geometry;
       const lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : [];
       for (const line of lines) {
@@ -166,7 +170,7 @@ export class RoadNet {
         }
         const len = cum[n - 1];
         if (len < 4) continue;
-        roads.push({ key, x, y, cum, len, cls, oneway: p.oneway === 1 || cls === Cls.Motorway, startNode, endNode });
+        roads.push({ key, x, y, cum, len, cls, oneway: p.oneway === 'true' || p.oneway === true || cls === Cls.Motorway, startNode, endNode });
       }
     }
     const nodes = new Map<string, number[]>();

@@ -2,86 +2,74 @@
 
 The planet in miniature, live.
 
-A 3D globe you can zoom from orbit down to a street corner, rendered like a tilt-shift model railway — with the real world moving on it in real time.
+A 3D world you can take in from orbit (macro) or walk down to a street corner (micro), always through a tilt-shift lens, with the real world moving on it in real time.
 
-| Layer | What you see | Source | Real? |
-| --- | --- | --- | --- |
-| Aircraft | Every aircraft with a transponder on, in the air **and on the ground**, drawn as a 3D model of its airframe family in its operator's colours. Click one for its exact model, registration, operator, altitude, speed, trail and planned route. | [adsb.lol](https://adsb.lol) (fallback [adsb.fi](https://adsb.fi)), [adsbdb](https://www.adsbdb.com), [OpenSky](https://opensky-network.org) | Live, ~5 s |
-| Satellites | ISS, the brightest satellites, GPS, weather and science spacecraft at their true altitude. | [CelesTrak](https://celestrak.org) orbital elements, propagated in the browser (SGP4) | Live, computed |
-| Ships | Vessels with AIS: name, type, size, destination. | [Fintraffic](https://www.digitraffic.fi/en/marine-traffic/) (Baltic, no key) · [aisstream.io](https://aisstream.io) (world-wide, optional free key) | Live, ~20 s |
-| Trains & buses | Buses, trams, metros, trains and ferries where the operator publishes open vehicle positions. | 20 open feeds — see [`shared/feeds.ts`](shared/feeds.ts) | Live, 8–30 s |
-| Shops & places | Green = open now, red = closed, evaluated in the place's own local time. | OpenStreetMap `opening_hours` via Overpass | Live rule evaluation |
-| Traffic | Cars and trucks moving along the real street network. | Simulated | **Estimate** |
-| Pedestrians | People walking along pavements and footpaths. | Simulated | **Estimate** |
+**Live:** https://tinyfoot.lusrodri.workers.dev
 
-Traffic and pedestrians are **not** real vehicles or people. No open world-wide feed of individual cars or pedestrians exists. They are an illustration of the flow you would expect right now: agents on the real street geometry, with density and speed estimated from local time of day, day of the week and street class. The UI labels them as estimates.
+## What you see
 
-The base map is OpenStreetMap vector tiles from [OpenFreeMap](https://openfreemap.org) (refreshed weekly), real terrain from [Mapterhorn](https://mapterhorn.com) and buildings extruded from OSM heights, including `building:part` detail on landmarks. No API key is needed for anything above.
+| Layer | Source | Real? |
+| --- | --- | --- |
+| Base world: 3D buildings, detailed landmarks, trees, terrain, lighting | [Mapbox Standard](https://www.mapbox.com/maps/standard) | Map data |
+| The Earth as it looked yesterday (real clouds, snow, smoke), at globe scale | [NASA GIBS](https://earthdata.nasa.gov/gibs) VIIRS true colour | Daily |
+| Precipitation measured from space | NASA GIBS IMERG | Latest available |
+| Aircraft, in the air and on the ground, one generated model per ICAO type, airline liveries | [adsb.lol](https://adsb.lol), [adsb.fi](https://adsb.fi), [adsbdb](https://www.adsbdb.com) | Live, ~5 s |
+| Satellites at true altitude | [CelesTrak](https://celestrak.org) elements, SGP4 in the browser | Live, computed |
+| Ships | [Fintraffic](https://www.digitraffic.fi/en/marine-traffic/) (Baltic) · [aisstream.io](https://aisstream.io) (world, optional key) | Live, ~20 s |
+| Trains, metros, trams, buses | 19 open operator feeds, see [`shared/feeds.ts`](shared/feeds.ts) | Live, 8–30 s |
+| Weather at the place you are looking at: rain, snow, fog, wind direction | [Open-Meteo](https://open-meteo.com) | Live, 15 min |
+| Rivers and flooding | [Open-Meteo Flood](https://open-meteo.com/en/docs/flood-api) (GloFAS, global), [USGS Water Data](https://api.waterdata.usgs.gov) (US gauges), [ANA](https://www.snirh.gov.br/hidrotelemetria/) telemetry (Brazil), [CGE São Paulo](https://www.cgesp.org) (active street flooding) | Model daily; gauges minutes old |
+| Shops and places, green when open, red when closed | OpenStreetMap `opening_hours` via Overpass | Rule evaluated live |
+| Road traffic and pedestrians | Simulated | **Estimate** |
 
-## View modes
+Lighting follows the real sun where you are looking (dawn, day, dusk, night), and the day/night line is drawn on the globe.
 
-- **Miniature** — tilt-shift: a sharp band across the middle, progressively blurred toward the top and bottom, with boosted colour.
-- **Map** — the plain map.
-- **Satellite** — Sentinel-2 cloudless imagery ([EOX](https://s2maps.eu), CC BY-NC-SA 4.0).
-- **Night** — dark map; windows of vehicles and aircraft light up.
+### What is real and what is not
 
-A day/night terminator is drawn on the globe from the actual position of the sun.
+- Traffic and pedestrians are **not** real vehicles or people. They are agents on the real street geometry, at real size, with density and speed estimated from local time, weekday and street class. Cars are drawn from each region's best-selling models (body type and real dimensions).
+- Aircraft, ship, train, bus, car and person models are generated procedurally from real dimensions. They have the right proportions and layout for their type, not every detail of the real thing.
+- River markers from Open-Meteo Flood are a hydrological model, compared with that river's own last 60 days: blue normal, amber high, red flood. USGS and ANA markers are measured levels.
+- SAISP does not publish an open API (its data needs a login), so São Paulo flooding comes from CGE's public page, which gives counts but no coordinates. ANA's newer HidroWebService also needs credentials; the open telemetry service it replaced is used instead.
 
-## Light on any device
+## Controls
 
-- No model files, textures or icon fonts: every aircraft, ship, train, bus, car and person is a few hundred triangles generated at start-up and drawn with GPU instancing in one custom WebGL layer.
-- The device is classified on load (cores, memory, touch, data-saver) into light / medium / high, which sets pixel ratio, frame-rate cap, terrain, blur passes and how many simulated agents are drawn. If frames get slow it steps down by itself. You can override it in the “i” dialog or with `?q=low|medium|high`.
-- Opening-hours parsing and timezone lookup are only downloaded when you zoom into a street.
-- Rendering pauses in background tabs.
+There is no interface by default. Drag, scroll and tilt the map; click an aircraft, ship, vehicle, satellite or river gauge for details.
+
+- **G** shows or hides the interface (layers, search, view modes).
+- **M** steps through the view modes: Miniature (tilt-shift), Map, Satellite, Night.
+- `?q=low|medium|high` forces a quality level.
 
 ## How it works
 
 ```
-browser ── MapLibre GL JS (globe + terrain + buildings)
-   │        └─ one instanced custom layer for everything that moves
-   │
+browser ── Mapbox GL JS (globe, terrain, 3D buildings, weather effects)
+   │        └─ one instanced WebGL layer for everything that moves
    └─ /api/* ── Cloudflare Worker: caching pass-through to the open feeds
 ```
 
-The Worker (`worker/index.ts`) does no parsing — bytes in, bytes out, with a short edge cache per feed so that all viewers share one upstream request. The browser decodes everything, including GTFS-Realtime protobuf with a ~100-line reader (`src/data/gtfsrt.ts`).
-
-Positions arrive every few seconds; between reports each object is dead-reckoned along its last course and speed and eased toward the next report (`src/util/mover.ts`), so motion is continuous.
+- Every model is a mesh generated in code (`src/gl/meshes.ts`), drawn with GPU instancing, and cached in IndexedDB after first use (`src/gl/meshcache.ts`).
+- Position reports arrive every few seconds; between them each object is dead-reckoned and eased toward the next report (`src/util/mover.ts`).
+- The Worker (`worker/index.ts`) does no parsing: bytes in, bytes out, with a short edge cache per feed so that all viewers share one upstream request.
+- The device is classified on load and the amount of detail adapts; it steps down by itself if frames get slow.
 
 ## Run it
 
 ```sh
 npm install
 npm run dev      # Vite on :5173, Worker API on :8787
-```
-
-```sh
 npm run deploy   # build + wrangler deploy
 ```
 
-### Optional keys
+### Keys
 
-Both are free and only widen coverage; everything else works without them.
+- **Mapbox** (required): copy `.env.example` to `.env.local` and set `VITE_MAPBOX_TOKEN` to a public token from your Mapbox account. It is read at build time and is not committed. Restrict the token to your site URLs in the Mapbox dashboard, since it ends up in the published bundle.
+- Optional, both free, both only widen coverage:
 
 ```sh
-npx wrangler secret put AISSTREAM_KEY   # ships world-wide (aisstream.io)
-npx wrangler secret put SPTRANS_TOKEN   # São Paulo buses (sptrans.com.br/desenvolvedores)
+npx wrangler secret put AISSTREAM_KEY   # ships world-wide
+npx wrangler secret put SPTRANS_TOKEN   # São Paulo buses
 ```
-
-### Adding a city's buses or trains
-
-If the operator publishes GTFS-Realtime vehicle positions without a key, add one entry to [`shared/feeds.ts`](shared/feeds.ts):
-
-```ts
-{ id: 'mycity', name: 'My City Transit', bbox: [west, south, east, north], format: 'gtfsrt', mode: 'bus', ttl: 15, url: 'https://…/VehiclePositions.pb' },
-```
-
-## Limits worth knowing
-
-- Aircraft coverage is what volunteer receivers hear; oceans and some regions are sparse. From a whole-planet view only the busiest air-traffic regions on the visible side are sampled; zoom in for everything.
-- Satellites above 2,500 km (GPS, geostationary) are drawn at 2,500 km so they stay in view.
-- Buildings are OSM extrusions, not photogrammetry: shapes and heights are real where mapped, façades are not.
-- Shops without an `opening_hours` tag in OSM are not shown.
 
 ## License
 
-Code: MIT. Map data © OpenStreetMap contributors (ODbL). Each data source keeps its own terms; see the links above.
+Code: MIT. Each data source keeps its own terms; see the links above.

@@ -4,3 +4,6 @@ dist
 .dev.vars
 *.log
 .claude
+.env
+.env.local
+.env.*.local

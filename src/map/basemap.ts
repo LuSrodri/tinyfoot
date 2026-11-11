@@ -1,119 +1,230 @@
-// Base map: OpenStreetMap vector tiles (OpenFreeMap), real terrain (Mapterhorn),
-// extruded buildings and the view modes. No API keys anywhere.
+// Base map: Mapbox Standard (3D buildings, detailed landmarks, trees, dynamic lighting, terrain)
+// with NASA GIBS on top for what the planet actually looks like today.
 
-import { Map as MlMap, AttributionControl, GeolocateControl, NavigationControl, setWorkerUrl, type CustomLayerInterface, type LayerSpecification, type StyleSpecification } from 'maplibre-gl';
-import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
+import mapboxgl, { type CustomLayerInterface, type Map as MbMap } from 'mapbox-gl';
+import { MAPBOX_TOKEN } from '../config';
 import type { Tier } from '../core';
-import { subSolarPoint, DEG } from '../util/geo';
-import { installFacades } from './facades';
-
-setWorkerUrl(workerUrl);
+import { DEG, solarHour, subSolarPoint, sunElevation } from '../util/geo';
 
 export type Mode = 'mini' | 'map' | 'sat' | 'night';
 export const MODES: Mode[] = ['mini', 'map', 'sat', 'night'];
 
-const STYLE_URL = { light: 'https://tiles.openfreemap.org/styles/liberty', dark: 'https://tiles.openfreemap.org/styles/dark' };
-const OVERLAY_SOURCES = ['route', 'orbit', 'places', 'night'] as const;
+const STYLE = { std: 'mapbox://styles/mapbox/standard', sat: 'mapbox://styles/mapbox/standard-satellite' };
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
-const FONT = ['Noto Sans Regular'];
-const FONT_BOLD = ['Noto Sans Bold'];
-/** Terrain is only switched on once mountains are actually perceptible. */
-const TERRAIN_MIN_ZOOM = 8.5;
+const DATA_SOURCES = ['route', 'orbit', 'places', 'night', 'water'];
+const FONT = ['DIN Pro Medium', 'Arial Unicode MS Regular'];
+const GIBS = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best';
+
+export interface Weather {
+  /** mm/h */
+  rain: number;
+  /** cm/h */
+  snow: number;
+  /** metres */
+  visibility: number;
+  /** 0..1 */
+  cloud: number;
+  /** degrees the wind blows from, and km/h */
+  windDir: number;
+  windSpeed: number;
+}
 
 export class Basemap {
-  readonly map: MlMap;
   mode: Mode;
-  readonly vectorSource = 'openmaptiles';
-  private base = new Map<string, StyleSpecification>();
+  /** Vector source the traffic simulation reads street geometry from. */
+  readonly vectorSource = 'tf-streets';
   private custom: CustomLayerInterface | null = null;
-  private terrainOn = false;
+  private data: Record<string, GeoJSON.FeatureCollection> = {};
   private nightAt = 0;
+  private preset = '';
+  private autoTilt = true;
+  private weather: Weather | null = null;
 
-  private constructor(private readonly tier: Tier, mode: Mode, map: MlMap) {
+  private constructor(readonly map: MbMap, private readonly tier: Tier, mode: Mode) {
     this.mode = mode;
-    this.map = map;
   }
 
   static async create(container: string, tier: Tier, mode: Mode): Promise<Basemap> {
-    const probe = new Basemap(tier, mode, null as unknown as MlMap);
-    const style = await probe.buildStyle(mode, null);
+    mapboxgl.accessToken = MAPBOX_TOKEN;
     // Start over the viewer's side of the planet (guessed from their clock, not their location).
     const lon = Math.max(-170, Math.min(170, -(new Date().getTimezoneOffset() / 60) * 15));
-    const map = new MlMap({
+    const map = new mapboxgl.Map({
       container,
-      style,
+      style: mode === 'sat' ? STYLE.sat : STYLE.std,
+      projection: 'globe',
       center: [lon, 12],
       zoom: 1.7,
       minZoom: 0.8,
-      maxZoom: 19,
       maxPitch: 80,
       hash: true,
-      attributionControl: false,
-      pixelRatio: tier.pixelRatio,
-      canvasContextAttributes: { antialias: tier.quality !== 'low', powerPreference: 'high-performance' },
-      fadeDuration: 150,
-      cancelPendingTileRequestsWhileZooming: true,
+      antialias: tier.quality !== 'low',
+      attributionControl: true,
     });
-    installFacades(map);
-    const self = new Basemap(tier, mode, map);
-    self.base = probe.base;
-    map.addControl(new AttributionControl({ compact: true }), 'bottom-right');
-    map.addControl(new NavigationControl({ visualizePitch: true }), 'bottom-right');
-    map.addControl(new GeolocateControl({ positionOptions: { enableHighAccuracy: false }, trackUserLocation: false }), 'bottom-right');
-    map.on('styledata', () => self.ensureCustom());
-    map.on('idle', () => self.ensureCustom());
-    map.on('zoom', () => self.syncTerrain());
+    const self = new Basemap(map, tier, mode);
+    map.on('style.load', () => self.decorate());
+    map.on('moveend', () => self.tilt());
+    map.on('pitchstart', (e) => {
+      if ((e as { originalEvent?: unknown }).originalEvent) self.autoTilt = false;
+    });
     map.on('error', (e) => {
-      // Tile 404s over oceans and beyond a source's max zoom are expected; keep the console quiet.
       if (!/tile|404|Failed to fetch|AbortError/i.test(String(e.error?.message ?? ''))) console.warn('[tinyfoot]', e.error);
     });
     await new Promise<void>((resolve) => (map.loaded() ? resolve() : map.once('load', () => resolve())));
-    self.syncTerrain();
-    self.updateNight(Date.now());
+    if (!map.getSource('night')) self.decorate();
+    self.tilt();
     return self;
+  }
+
+  /**
+   * Seen from straight above, 3D buildings and aircraft look flat. So once a move ends the camera
+   * leans over to suit the zoom: top-down at globe scale, about 60 degrees at street scale.
+   * It stops as soon as you set the tilt yourself, until you zoom back out to the globe.
+   */
+  private tilt(): void {
+    const map = this.map;
+    const zoom = map.getZoom();
+    if (zoom < 5) this.autoTilt = true;
+    if (!this.autoTilt) return;
+    const f = Math.max(0, Math.min(1, (zoom - 5.5) / 7));
+    const target = 60 * f * f * (3 - 2 * f);
+    if (Math.abs(target - map.getPitch()) > 3) map.easeTo({ pitch: target, duration: 700 });
   }
 
   /** Registers the 3D layer; it is re-inserted whenever the style is swapped. */
   attach(layer: CustomLayerInterface): void {
     this.custom = layer;
-    this.ensureCustom();
+    if (this.map.isStyleLoaded() && !this.map.getLayer(layer.id)) this.map.addLayer(layer);
   }
 
-  private ensureCustom(): void {
+  /** Adds everything that is ours to a freshly loaded Mapbox style. */
+  private decorate(): void {
     const map = this.map;
-    if (!this.custom) return;
-    try {
-      if (map.getLayer(this.custom.id)) return;
-      // Sit above the buildings but below labels, so place names stay readable.
-      const layers = map.getStyle().layers;
-      const after = layers.findIndex((l) => l.id === 'tf-buildings');
-      const before = layers.slice(after + 1).find((l) => l.type === 'symbol' || l.id.startsWith('tf-'));
-      map.addLayer(this.custom, before?.id);
-    } catch {
-      // Style still loading; the next 'styledata' or 'idle' event retries.
-    }
-  }
+    const sat = this.mode === 'sat';
 
-  private syncTerrain(): void {
-    const want = this.tier.terrain && this.map.getZoom() >= TERRAIN_MIN_ZOOM;
-    if (want === this.terrainOn || !this.map.isStyleLoaded()) return;
-    this.terrainOn = want;
-    try {
-      this.map.setTerrain(want ? { source: 'terrain', exaggeration: this.mode === 'mini' ? 1.2 : 1 } : null);
-    } catch {
-      this.terrainOn = !want;
+    map.addSource('mapbox-dem', { type: 'raster-dem', url: 'mapbox://mapbox.mapbox-terrain-dem-v1', tileSize: 512, maxzoom: 14 });
+    this.applyTier();
+
+    // NASA GIBS: the most recent daily true-colour image of the whole Earth (real clouds, real
+    // snow cover, real smoke), and the latest satellite-measured precipitation.
+    // Today's image is still being assembled orbit by orbit, so use yesterday's, which is complete.
+    const day = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    map.addSource('gibs-color', {
+      type: 'raster',
+      tiles: [`${GIBS}/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${day}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`],
+      tileSize: 256,
+      maxzoom: 9,
+      attribution: 'Imagery: <a href="https://earthdata.nasa.gov/gibs" target="_blank" rel="noopener">NASA GIBS</a>',
+    });
+    map.addSource('gibs-rain', {
+      type: 'raster',
+      tiles: [`${GIBS}/IMERG_Precipitation_Rate/default/default/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png`],
+      tileSize: 256,
+      maxzoom: 6,
+    });
+    map.addLayer({
+      id: 'tf-gibs',
+      type: 'raster',
+      slot: 'bottom',
+      source: 'gibs-color',
+      maxzoom: 9.5,
+      paint: {
+        // Macro view: the real planet. It gives way to the map (or to aerial imagery) as you come down.
+        'raster-opacity': sat ? ['interpolate', ['linear'], ['zoom'], 5.5, 1, 8.5, 0] : ['interpolate', ['linear'], ['zoom'], 3.5, 0.92, 6.5, 0],
+        'raster-fade-duration': 200,
+      },
+    });
+    map.addLayer({
+      id: 'tf-gibs-rain',
+      type: 'raster',
+      slot: 'middle',
+      source: 'gibs-rain',
+      maxzoom: 10,
+      paint: { 'raster-opacity': ['interpolate', ['linear'], ['zoom'], 0, 0.42, 7, 0.38, 10, 0], 'raster-resampling': 'linear' },
+    });
+
+    // Street geometry for the traffic and pedestrian simulation (never drawn).
+    map.addSource(this.vectorSource, { type: 'vector', url: 'mapbox://mapbox.mapbox-streets-v8' });
+    map.addLayer({ id: 'tf-streets-probe', type: 'line', slot: 'bottom', source: this.vectorSource, 'source-layer': 'road', minzoom: 14.5, paint: { 'line-opacity': 0.01, 'line-width': 0.1 } });
+
+    for (const id of DATA_SOURCES) {
+      map.addSource(id, { type: 'geojson', data: this.data[id] ?? EMPTY });
+      // Remember what each source holds so that a style swap does not lose it.
+      const src = map.getSource(id) as unknown as { setData(d: GeoJSON.FeatureCollection): unknown };
+      const original = src.setData.bind(src);
+      src.setData = (d) => {
+        this.data[id] = d;
+        return original(d);
+      };
     }
+
+    const top = { slot: 'top' } as const;
+    map.addLayer({ id: 'tf-night', type: 'fill', ...top, source: 'night', maxzoom: 7, paint: { 'fill-color': '#050a1c', 'fill-opacity': ['interpolate', ['linear'], ['zoom'], 0, 0.4, 4.5, 0.32, 7, 0], 'fill-antialias': false } });
+    map.addLayer({ id: 'tf-orbit', type: 'line', ...top, source: 'orbit', layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ffc83d', 'line-width': 1.6, 'line-opacity': 0.85, 'line-dasharray': [2, 2], 'line-emissive-strength': 1 } });
+    map.addLayer({ id: 'tf-route-ahead', type: 'line', ...top, source: 'route', filter: ['==', ['get', 'kind'], 'ahead'], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ffc83d', 'line-width': 2, 'line-opacity': 0.9, 'line-dasharray': [1.5, 2], 'line-emissive-strength': 1 } });
+    map.addLayer({ id: 'tf-route-flown', type: 'line', ...top, source: 'route', filter: ['==', ['get', 'kind'], 'flown'], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ffc83d', 'line-width': 2, 'line-opacity': 0.45, 'line-emissive-strength': 1 } });
+    map.addLayer({ id: 'tf-route-airport', type: 'circle', ...top, source: 'route', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': 5, 'circle-color': '#ffc83d', 'circle-stroke-color': '#1f2933', 'circle-stroke-width': 1.5, 'circle-emissive-strength': 1 } });
+    map.addLayer({ id: 'tf-route-airport-label', type: 'symbol', ...top, source: 'route', filter: ['==', ['geometry-type'], 'Point'], layout: { 'text-field': ['get', 'label'], 'text-font': FONT, 'text-size': 12, 'text-offset': [0, 1.1], 'text-anchor': 'top', 'text-allow-overlap': true }, paint: { 'text-color': '#1f2933', 'text-halo-color': '#ffffff', 'text-halo-width': 1.6, 'text-emissive-strength': 1 } });
+
+    // Shops and places: a small dot, green when open and red when closed, only at street level.
+    map.addLayer({
+      id: 'tf-places',
+      type: 'circle',
+      ...top,
+      source: 'places',
+      minzoom: 17.3,
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 17.3, 2, 19.5, 4.5],
+        'circle-color': ['match', ['get', 'state'], 'open', '#2fb344', 'closed', '#e5484d', '#8b949e'],
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 1,
+        'circle-opacity': ['match', ['get', 'state'], 'unknown', 0.6, 0.95],
+        'circle-emissive-strength': 1,
+      },
+    });
+
+    // River gauges and flood points: blue is normal, amber is high, red is flooding.
+    map.addLayer({
+      id: 'tf-water',
+      type: 'circle',
+      ...top,
+      source: 'water',
+      minzoom: 5,
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 3, 10, 6, 15, 9],
+        'circle-color': ['match', ['get', 'level'], 'flood', '#e5484d', 'high', '#f59f00', 'low', '#9aa7b4', '#2f80ed'],
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 1.5,
+        'circle-emissive-strength': 1,
+      },
+    });
+    map.addLayer({
+      id: 'tf-water-label',
+      type: 'symbol',
+      ...top,
+      source: 'water',
+      minzoom: 9,
+      layout: { 'text-field': ['get', 'label'], 'text-font': FONT, 'text-size': 11, 'text-offset': [0, 1], 'text-anchor': 'top', 'text-optional': true, 'text-max-width': 9 },
+      paint: { 'text-color': ['match', ['get', 'level'], 'flood', '#b42318', 'high', '#9a5b00', '#0b4a99'], 'text-halo-color': '#ffffff', 'text-halo-width': 1.4, 'text-emissive-strength': 1 },
+    });
+
+    if (this.custom && !map.getLayer(this.custom.id)) map.addLayer(this.custom);
+    this.preset = '';
+    this.nightAt = 0;
+    this.updateLight(Date.now());
+    this.applyWeather();
   }
 
   /** Re-applies settings after the quality tier changed at runtime. */
   applyTier(): void {
-    this.map.setPixelRatio(this.tier.pixelRatio);
-    this.syncTerrain();
+    try {
+      this.map.setTerrain(this.tier.terrain ? { source: 'mapbox-dem', exaggeration: 1 } : null);
+    } catch {
+      /* style not ready */
+    }
   }
 
   /** Ground elevation in metres, matching what the map draws. */
   elevation(lat: number, lon: number): number {
-    if (!this.terrainOn) return 0;
     try {
       return this.map.queryTerrainElevation([lon, lat]) ?? 0;
     } catch {
@@ -123,38 +234,52 @@ export class Basemap {
 
   async setMode(mode: Mode): Promise<void> {
     if (mode === this.mode) return;
-    const style = await this.buildStyle(mode, this.map);
+    const before = this.mode === 'sat' ? STYLE.sat : STYLE.std;
+    const after = mode === 'sat' ? STYLE.sat : STYLE.std;
     this.mode = mode;
-    this.terrainOn = false;
-    this.map.setStyle(style, { diff: false });
-    this.map.once('styledata', () => {
-      this.syncTerrain();
-      this.ensureCustom();
-    });
-    if (mode === 'mini' && this.map.getZoom() > 9 && this.map.getPitch() < 35) this.map.easeTo({ pitch: 55, duration: 900 });
+    if (before !== after) {
+      this.map.setStyle(after);
+      await new Promise<void>((resolve) => this.map.once('style.load', () => resolve()));
+    } else {
+      this.preset = '';
+      this.updateLight(Date.now());
+    }
   }
 
-  /** Day/night shading on the globe, from the real position of the sun. */
-  updateNight(now: number): void {
+  /**
+   * Lighting follows the real sun at the place you are looking at (dawn, day, dusk or night),
+   * and the day/night boundary is drawn on the globe.
+   */
+  updateLight(now: number): void {
+    const map = this.map;
+    const c = map.getCenter();
+    const sun = sunElevation(c.lat, c.lng, now);
+    const preset = this.mode === 'night' || sun < -5 ? 'night' : sun > 7 ? 'day' : solarHour(c.lng, now) < 12 ? 'dawn' : 'dusk';
+    if (preset !== this.preset) {
+      try {
+        map.setConfigProperty('basemap', 'lightPreset', preset);
+        this.preset = preset;
+      } catch {
+        /* style still loading */
+      }
+    }
     if (now - this.nightAt < 60000) return;
-    const src = this.map.getSource('night') as { setData(d: GeoJSON.FeatureCollection): void } | undefined;
+    const src = map.getSource('night') as { setData(d: GeoJSON.FeatureCollection): void } | undefined;
     if (!src) return;
     this.nightAt = now;
     const [sunLon, sunLat] = subSolarPoint(now);
     const tan = Math.tan((Math.abs(sunLat) < 0.5 ? (sunLat < 0 ? -0.5 : 0.5) : sunLat) * DEG);
     const pole = sunLat > 0 ? -85 : 85;
     const edge = (lon: number): number => Math.max(-85, Math.min(85, Math.atan(-Math.cos((lon - sunLon) * DEG) / tan) / DEG));
-    // Many narrow strips instead of one planet-sized polygon: those tessellate cleanly on the globe.
+    // Many small pieces instead of one planet-sized polygon: those tessellate cleanly on the globe.
     const step = 4;
     const strips: [number, number][][][] = [];
     for (let lon = -180; lon < 180; lon += step) {
       const a = edge(lon);
       const b = edge(lon + step);
-      // Split tall strips so that no single piece spans a large part of the sphere.
       const parts = Math.max(1, Math.ceil(Math.abs(pole - (a + b) / 2) / 12));
       for (let i = 0; i < parts; i++) {
-        const f0 = i / parts;
-        const f1 = (i + 1) / parts;
+        const f0 = i / parts, f1 = (i + 1) / parts;
         const a0 = a + (pole - a) * f0, a1 = a + (pole - a) * f1;
         const b0 = b + (pole - b) * f0, b1 = b + (pole - b) * f1;
         strips.push([[[lon, a0], [lon + step, b0], [lon + step, b1], [lon, a1], [lon, a0]]]);
@@ -163,192 +288,50 @@ export class Basemap {
     src.setData({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'MultiPolygon', coordinates: strips } }] });
   }
 
-  private async baseStyle(kind: 'light' | 'dark'): Promise<StyleSpecification> {
-    let style = this.base.get(kind);
-    if (!style) {
-      const res = await fetch(STYLE_URL[kind]);
-      if (!res.ok) throw new Error(`style ${res.status}`);
-      style = (await res.json()) as StyleSpecification;
-      this.base.set(kind, style);
-    }
-    return structuredClone(style);
+  /** Shows the weather that is really happening where you are looking: rain, snow and fog. */
+  setWeather(w: Weather | null): void {
+    this.weather = w;
+    this.applyWeather();
   }
 
-  private async buildStyle(mode: Mode, map: MlMap | null): Promise<StyleSpecification> {
-    const dark = mode === 'night';
-    const style = await this.baseStyle(dark ? 'dark' : 'light');
-    const previous = map?.getStyle().sources ?? {};
-
-    style.projection = { type: 'globe' };
-    style.sources.terrain = { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' };
-    style.sources.hillshade = { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' };
-    if (mode === 'sat') {
-      style.sources.imagery = {
-        type: 'raster',
-        tiles: ['https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg'],
-        tileSize: 256,
-        maxzoom: 15,
-        attribution: '<a href="https://s2maps.eu" target="_blank" rel="noopener">Sentinel-2 cloudless</a> by EOX (Copernicus Sentinel data 2020)',
-      };
-    }
-    for (const id of OVERLAY_SOURCES) {
-      const prev = previous[id] as { data?: unknown } | undefined;
-      style.sources[id] = { type: 'geojson', data: (prev?.data as GeoJSON.FeatureCollection | undefined) ?? EMPTY };
-    }
-
-    style.sky = dark
-      ? { 'sky-color': '#0b1020', 'horizon-color': '#1b2440', 'fog-color': '#0b1020', 'fog-ground-blend': 0.7, 'horizon-fog-blend': 0.6, 'sky-horizon-blend': 0.8, 'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 0.9, 5, 0.9, 7, 0] }
-      : { 'sky-color': '#7fbcff', 'horizon-color': '#eaf4ff', 'fog-color': '#ffffff', 'fog-ground-blend': 0.6, 'horizon-fog-blend': 0.5, 'sky-horizon-blend': 0.75, 'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 1, 5, 1, 7, 0] };
-    style.light = { anchor: 'viewport', position: [1.4, 215, 38], intensity: dark ? 0.25 : 0.45, color: '#ffffff' };
-
-    let layers: LayerSpecification[] = style.layers.filter((l) => l.type !== 'fill-extrusion');
-
-    if (mode === 'sat') {
-      // Imagery replaces every painted surface; roads, borders and labels stay on top.
-      layers = layers.filter((l) => l.type !== 'fill' && l.type !== 'background' && l.id !== 'natural_earth');
-      layers.unshift({ id: 'tf-space', type: 'background', paint: { 'background-color': '#0b1a2b' } }, { id: 'tf-imagery', type: 'raster', source: 'imagery', paint: { 'raster-fade-duration': 150 } });
-      for (const l of layers) {
-        if (l.type === 'line' && l['source-layer'] === 'transportation') l.paint = { ...l.paint, 'line-opacity': 0.55 };
+  private applyWeather(): void {
+    const map = this.map;
+    const w = this.weather;
+    try {
+      // Precipitation is only drawn once you are close enough to be "in" it.
+      const near = map.getZoom() > 9;
+      if (w && near && w.rain > 0.05 && w.snow <= 0) {
+        const k = Math.min(1, w.rain / 8);
+        map.setRain({
+          density: 0.2 + 0.6 * k,
+          intensity: 0.4 + 0.6 * k,
+          color: '#a8b3c4',
+          opacity: 0.55 + 0.3 * k,
+          vignette: 0.3 + 0.5 * k,
+          'vignette-color': '#56606e',
+          direction: [(w.windDir + 180) % 360, Math.max(55, 85 - w.windSpeed * 0.6)],
+          'droplet-size': [1.1, 9 + 9 * k],
+          'distortion-strength': 0.5,
+          'center-thinning': 0,
+        });
+      } else {
+        map.setRain(null);
       }
-    } else if (mode === 'mini') {
-      // A touch more colour for the model-railway look.
-      for (const l of layers) {
-        if (l.id === 'background') l.paint = { 'background-color': '#f3efe6' };
-        if (l.id === 'water' && l.type === 'fill') l.paint = { ...l.paint, 'fill-color': '#8ccbf2' };
-        if ((l.id === 'landcover_wood' || l.id === 'park') && l.type === 'fill') l.paint = { ...l.paint, 'fill-color': l.id === 'park' ? '#bfe6a8' : '#9ed48a', 'fill-opacity': 0.75 };
-        if (l.id === 'landcover_grass' && l.type === 'fill') l.paint = { ...l.paint, 'fill-color': '#c9ecb0', 'fill-opacity': 0.7 };
+      if (w && near && w.snow > 0) {
+        const k = Math.min(1, w.snow / 3);
+        map.setSnow({ density: 0.3 + 0.7 * k, intensity: 0.5 + 0.5 * k, color: '#ffffff', opacity: 0.9, vignette: 0.3 * k, 'flake-size': 0.7, direction: [(w.windDir + 180) % 360, 55] });
+      } else {
+        map.setSnow(null);
       }
+      // Fog and low cloud shorten how far you can see.
+      if (w && w.visibility < 6000) {
+        const k = 1 - Math.max(0, w.visibility - 300) / 5700;
+        map.setFog({ range: [0.4 - 0.9 * k, 7 - 5.5 * k], color: '#d9dee3', 'high-color': '#c5ccd4', 'horizon-blend': 0.25, 'space-color': '#0b1a2b', 'star-intensity': 0 });
+      } else {
+        map.setFog(null);
+      }
+    } catch {
+      /* effects are optional */
     }
-
-    const firstLine = layers.findIndex((l) => l.type === 'line');
-    const hillshade: LayerSpecification = {
-      id: 'tf-hillshade',
-      type: 'hillshade',
-      source: 'hillshade',
-      maxzoom: 16,
-      paint: {
-        'hillshade-exaggeration': mode === 'sat' ? 0.25 : dark ? 0.35 : 0.42,
-        'hillshade-shadow-color': dark ? '#000000' : '#5a4a3a',
-        'hillshade-highlight-color': dark ? '#3a4763' : '#ffffff',
-        'hillshade-accent-color': dark ? '#0a0d14' : '#6b5d4d',
-      },
-    };
-    layers.splice(firstLine < 0 ? layers.length : firstLine, 0, hillshade);
-
-    const night: LayerSpecification = {
-      id: 'tf-night',
-      type: 'fill',
-      source: 'night',
-      maxzoom: 9,
-      paint: { 'fill-color': '#050a1c', 'fill-opacity': ['interpolate', ['linear'], ['zoom'], 0, dark ? 0.45 : 0.34, 5, dark ? 0.4 : 0.28, 9, 0], 'fill-antialias': false },
-    };
-
-    const buildings: LayerSpecification = {
-      id: 'tf-buildings',
-      type: 'fill-extrusion',
-      source: this.vectorSource,
-      'source-layer': 'building',
-      minzoom: 13,
-      filter: ['!=', ['get', 'hide_3d'], true],
-      paint: {
-        'fill-extrusion-color': dark
-          ? ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 6], 0, '#262b38', 60, '#313849', 200, '#414c63']
-          : mode === 'mini'
-            ? ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 6], 0, '#f4ead9', 25, '#efe2cf', 80, '#e3dfe4', 200, '#cfdcec', 400, '#bfd2ea']
-            : ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 6], 0, '#ece8e1', 60, '#dfdcd6', 200, '#ccd5e0', 400, '#bccbe0'],
-        'fill-extrusion-height': ['interpolate', ['linear'], ['zoom'], 13, 0, 14.2, ['coalesce', ['get', 'render_height'], 6]],
-        'fill-extrusion-base': ['interpolate', ['linear'], ['zoom'], 13, 0, 14.2, ['coalesce', ['get', 'render_min_height'], 0]],
-        'fill-extrusion-opacity': 1,
-        'fill-extrusion-vertical-gradient': true,
-        // Walls: a generated facade chosen by the building's height, so towers get curtain walls,
-        // mid-rises get concrete or brick and houses get plaster. Flat colour until street zoom.
-        'fill-extrusion-pattern': [
-          'step', ['zoom'], '',
-          15,
-          ['let', 'h', ['coalesce', ['get', 'render_height'], 6], 'k', ['%', ['round', ['*', ['coalesce', ['get', 'render_height'], 6], 13]], 6],
-            ['concat', dark ? 'fa-n-' : 'fa-',
-              ['case',
-                ['>', ['var', 'h'], 90], ['match', ['%', ['var', 'k'], 2], 0, 'glass', 'dark'],
-                ['>', ['var', 'h'], 35], ['match', ['var', 'k'], 0, 'glass', 1, 'concrete', 2, 'white', 3, 'concrete', 4, 'dark', 'cream'],
-                ['match', ['var', 'k'], 0, 'plaster', 1, 'cream', 2, 'brick', 3, 'white', 4, 'pastel', 'plaster'],
-              ],
-            ],
-          ],
-        ],
-      },
-    };
-
-    // The facade pattern would also be painted on top of the building, so every building gets
-    // a thin separate roof slab in a roofing colour that hides it.
-    const roofs: LayerSpecification = {
-      id: 'tf-roofs',
-      type: 'fill-extrusion',
-      source: this.vectorSource,
-      'source-layer': 'building',
-      minzoom: 15,
-      filter: ['!=', ['get', 'hide_3d'], true],
-      paint: {
-        'fill-extrusion-color': dark
-          ? ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 6], 0, '#2b2f38', 60, '#353b47', 200, '#434c5c']
-          : ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 6], 0, '#b9715a', 9, '#c9b8a3', 30, '#bdbcb8', 120, '#a9b0b6'],
-        'fill-extrusion-base': ['coalesce', ['get', 'render_height'], 6],
-        'fill-extrusion-height': ['+', ['coalesce', ['get', 'render_height'], 6], 0.45],
-        'fill-extrusion-vertical-gradient': false,
-      },
-    };
-
-    const firstSymbol = layers.findIndex((l) => l.type === 'symbol');
-    const at = firstSymbol < 0 ? layers.length : firstSymbol;
-    const halo = dark ? '#10141f' : '#ffffff';
-    const ink = dark ? '#e9ecef' : '#1f2933';
-    const overlays: LayerSpecification[] = [
-      { id: 'tf-orbit', type: 'line', source: 'orbit', layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ffc83d', 'line-width': 1.6, 'line-opacity': 0.85, 'line-dasharray': [2, 2] } },
-      { id: 'tf-route-ahead', type: 'line', source: 'route', filter: ['==', ['get', 'kind'], 'ahead'], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ffc83d', 'line-width': 2, 'line-opacity': 0.9, 'line-dasharray': [1.5, 2] } },
-      { id: 'tf-route-flown', type: 'line', source: 'route', filter: ['==', ['get', 'kind'], 'flown'], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ffc83d', 'line-width': 2, 'line-opacity': 0.45 } },
-      { id: 'tf-route-airport', type: 'circle', source: 'route', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': 5, 'circle-color': '#ffc83d', 'circle-stroke-color': '#1f2933', 'circle-stroke-width': 1.5 } },
-      {
-        id: 'tf-places',
-        type: 'circle',
-        source: 'places',
-        minzoom: 14.7,
-        paint: {
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 14.7, 2.4, 17, 5, 19, 7],
-          'circle-color': ['match', ['get', 'state'], 'open', '#2fb344', 'closed', '#e5484d', '#8b949e'],
-          'circle-stroke-color': halo,
-          'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 14.7, 0.6, 17, 1.4],
-          'circle-opacity': ['match', ['get', 'state'], 'unknown', 0.7, 1],
-        },
-      },
-    ];
-    const labels: LayerSpecification[] = [
-      {
-        id: 'tf-route-airport-label',
-        type: 'symbol',
-        source: 'route',
-        filter: ['==', ['geometry-type'], 'Point'],
-        layout: { 'text-field': ['get', 'label'], 'text-font': FONT_BOLD, 'text-size': 12, 'text-offset': [0, 1.1], 'text-anchor': 'top', 'text-allow-overlap': true },
-        paint: { 'text-color': ink, 'text-halo-color': halo, 'text-halo-width': 1.6 },
-      },
-      {
-        id: 'tf-places-label',
-        type: 'symbol',
-        source: 'places',
-        minzoom: 16.4,
-        filter: ['!=', ['get', 'name'], ''],
-        layout: { 'text-field': ['get', 'name'], 'text-font': FONT, 'text-size': 11, 'text-offset': [0, 0.8], 'text-anchor': 'top', 'text-max-width': 8, 'text-optional': true },
-        paint: {
-          'text-color': ['match', ['get', 'state'], 'open', dark ? '#69db7c' : '#1c7c2c', 'closed', dark ? '#ff8787' : '#b42318', dark ? '#adb5bd' : '#57606a'],
-          'text-halo-color': halo,
-          'text-halo-width': 1.4,
-        },
-      },
-    ];
-    // The stock POI icons would sit under our open/closed dots; ours carry more information.
-    layers = layers.filter((l) => !/^poi_r/.test(l.id));
-    const at2 = layers.findIndex((l) => l.type === 'symbol');
-    layers.splice(at2 < 0 ? Math.min(at, layers.length) : at2, 0, night, buildings, roofs, ...overlays);
-    layers.push(...labels);
-    style.layers = layers;
-    return style;
   }
 }

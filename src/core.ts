@@ -1,4 +1,4 @@
-import type { Map as MlMap } from 'maplibre-gl';
+import type { Map as MlMap } from 'mapbox-gl';
 import type { FrameInfo, Scene } from './gl/instanced';
 
 export type Quality = 'low' | 'medium' | 'high';

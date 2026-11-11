@@ -329,6 +329,40 @@ async function api(path: string, q: URLSearchParams, env: Env, ctx: ExecutionCon
     );
   }
 
+  if (path === 'water/usgs') {
+    const b = (q.get('bbox') ?? '').split(',').map(Number);
+    if (b.length !== 4 || b.some((v) => !Number.isFinite(v)) || b[2] - b[0] > 12 || b[3] - b[1] > 12) return json({ error: 'bad_request' }, 400);
+    const bbox = b.map((v) => v.toFixed(1)).join(',');
+    return cached(
+      `usgs/${bbox}`,
+      { ttl: 300, timeout: 20000, type: 'application/json', urls: [`https://api.waterdata.usgs.gov/ogcapi/v0/collections/latest-continuous/items?f=json&parameter_code=00065&bbox=${bbox}&limit=300`] },
+      ctx,
+    );
+  }
+
+  if (path === 'water/ana/stations') {
+    return cached('ana-stations', { ttl: 86400, timeout: 28000, type: 'text/xml; charset=utf-8', urls: ['https://telemetriaws1.ana.gov.br/ServiceANA.asmx/ListaEstacoesTelemetricas?statusEstacoes=0&origem='] }, ctx);
+  }
+
+  if (path === 'water/ana/data') {
+    const cod = q.get('cod') ?? '';
+    if (!/^\d{6,9}$/.test(cod)) return json({ error: 'bad_request' }, 400);
+    // The service wants Brazilian dates; ask for yesterday and today (Brasília time).
+    const day = (offset: number): string => {
+      const d = new Date(Date.now() - 3 * 3600000 + offset * 86400000);
+      return `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${d.getUTCFullYear()}`;
+    };
+    return cached(
+      `ana-data/${cod}`,
+      { ttl: 900, timeout: 20000, type: 'text/xml; charset=utf-8', urls: [`https://telemetriaws1.ana.gov.br/ServiceANA.asmx/DadosHidrometeorologicos?codEstacao=${cod}&dataInicio=${day(-1)}&dataFim=${day(0)}`] },
+      ctx,
+    );
+  }
+
+  if (path === 'water/cge') {
+    return cached('cge-sp', { ttl: 300, type: 'text/html; charset=iso-8859-1', urls: ['https://www.cgesp.org/v3/alagamentos.jsp'] }, ctx);
+  }
+
   if (path === 'places') {
     const r = places(q);
     return r ? cached(r[0], r[1], ctx) : json({ error: 'bad_request' }, 400);

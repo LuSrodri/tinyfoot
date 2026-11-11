@@ -1,5 +1,5 @@
 import './style.css';
-import { Popup } from 'maplibre-gl';
+import mapboxgl from 'mapbox-gl';
 import { detectTier, getJson, tierFor, type Ctx, type Layer, type Quality, type Selection } from './core';
 import { AircraftLayer } from './data/aircraft';
 import { setMeshRegistrar } from './data/aircraftTypes';
@@ -7,6 +7,9 @@ import { PlacesLayer } from './data/places';
 import { SatelliteLayer } from './data/satellites';
 import { ShipLayer } from './data/ships';
 import { TransitLayer } from './data/transit';
+import { WaterLayer } from './data/water';
+import { WeatherWatch } from './data/weather';
+import { loadMeshCache } from './gl/meshcache';
 import { InstancedLayer, type FrameInfo, type Scene } from './gl/instanced';
 import { buildMeshes } from './gl/meshes';
 import { Basemap, MODES, type Mode } from './map/basemap';
@@ -40,6 +43,7 @@ const ICONS: Record<string, string> = {
   transit: '<path d="M6 3h12a2 2 0 0 1 2 2v11a2.500 2.500 0 0 1-1.500 2.300V20a1 1 0 0 1-2 0v-1.500h-9V20a1 1 0 0 1-2 0v-1.700A2.500 2.500 0 0 1 4 16V5a2 2 0 0 1 2-2zm0 3v5h12V6zm1.500 7.500a1.300 1.300 0 1 0 0 2.600 1.300 1.300 0 0 0 0-2.600zm9 0a1.300 1.300 0 1 0 0 2.600 1.300 1.300 0 0 0 0-2.600z"/>',
   traffic: '<path d="M6.200 5.500A2 2 0 0 1 8.100 4h7.800a2 2 0 0 1 1.900 1.500L19 10l1.300.900c.4.300.7.800.7 1.300V17a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-1H6v1a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-4.800c0-.500.300-1 .700-1.300L5 10zM7.100 10h9.800l-.900-3.500a.5.5 0 0 0-.500-.400H8.500a.5.5 0 0 0-.500.400zM6.500 12a1.200 1.200 0 1 0 0 2.400 1.200 1.200 0 0 0 0-2.400zm11 0a1.200 1.200 0 1 0 0 2.400 1.200 1.200 0 0 0 0-2.400z"/>',
   people: '<path d="M12 2.500a2.200 2.200 0 1 1 0 4.400 2.200 2.200 0 0 1 0-4.400zM9.800 8h4.400a2 2 0 0 1 2 1.800l.5 5a1 1 0 0 1-2 .200L14.500 13v8a1 1 0 0 1-2 0v-5h-1v5a1 1 0 0 1-2 0v-8l-.200 2a1 1 0 0 1-2-.200l.500-5a2 2 0 0 1 2-1.800z"/>',
+  water: '<path d="M12 2.500c3.200 3.900 6 7.400 6 11a6 6 0 0 1-12 0c0-3.600 2.800-7.100 6-11zm-3.500 11.800a3.500 3.500 0 0 0 3.500 3.200v-1.500a2 2 0 0 1-2-1.700z"/>',
   places: '<path d="M4 4h16l1 5a3 3 0 0 1-1.500 2.600V19a1 1 0 0 1-1 1H5.500a1 1 0 0 1-1-1v-7.400A3 3 0 0 1 3 9zm2.500 8v6H11v-4h3v4h3.500v-6a3 3 0 0 1-2-.800 3 3 0 0 1-3.500.300 3 3 0 0 1-3.500-.300 3 3 0 0 1-2 .800z"/>',
 };
 
@@ -51,6 +55,7 @@ const LAYER_LABEL: Record<string, Key> = {
   traffic: 'traffic',
   people: 'people',
   places: 'places',
+  water: 'water',
 };
 
 interface Spot {
@@ -81,7 +86,9 @@ async function main(): Promise<void> {
   let mode = store.get<Mode>('mode', 'mini');
   if (!MODES.includes(mode)) mode = 'mini';
 
+  await loadMeshCache();
   const base = await Basemap.create('map', tier, mode);
+  const weather = new WeatherWatch(base);
   const map = base.map;
 
   const ctx: Ctx = {
@@ -104,7 +111,8 @@ async function main(): Promise<void> {
   const traffic = new TrafficLayer(ctx, net);
   const people = new PeopleLayer(ctx, net);
   const places = new PlacesLayer(ctx);
-  const layers: Layer[] = [aircraft, satellites, ships, transit, traffic, people, places];
+  const water = new WaterLayer(ctx);
+  const layers: Layer[] = [aircraft, satellites, ships, transit, traffic, people, places, water];
   const pickers = [aircraft, satellites, ships, transit];
 
   const enabled = store.get<Record<string, boolean>>('layers', {});
@@ -185,7 +193,7 @@ async function main(): Promise<void> {
   setMeshRegistrar((mesh) => layer3d.addMesh(mesh));
   base.attach(layer3d);
 
-  const popup = new Popup({ closeButton: true, maxWidth: '260px', offset: 10 });
+  const popup = new mapboxgl.Popup({ closeButton: true, maxWidth: '260px', offset: 10 });
   map.on('click', (e) => {
     const ref = layer3d.pick(e.point.x, e.point.y);
     if (ref) {
@@ -197,6 +205,22 @@ async function main(): Promise<void> {
           return;
         }
       }
+    }
+    const wet = map.getLayer('tf-water') ? map.queryRenderedFeatures([[e.point.x - 8, e.point.y - 8], [e.point.x + 8, e.point.y + 8]], { layers: ['tf-water'] }) : [];
+    if (wet.length) {
+      const p = wet[0].properties as { name: string; detail: string; source: string; level: string };
+      const el = document.createElement('div');
+      const h = document.createElement('h3');
+      h.textContent = p.name;
+      const st = document.createElement('div');
+      st.className = `st ${p.level === 'flood' ? 'closed' : p.level === 'high' ? 'unknown' : 'open'}`;
+      st.textContent = p.detail;
+      const src = document.createElement('div');
+      src.className = 'kind';
+      src.textContent = p.source;
+      el.append(h, st, src);
+      popup.setLngLat(e.lngLat).setDOMContent(el).addTo(map);
+      return;
     }
     const hits = map.getLayer('tf-places') ? map.queryRenderedFeatures([[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]], { layers: ['tf-places'] }) : [];
     if (hits.length) {
@@ -227,25 +251,6 @@ async function main(): Promise<void> {
     hoverAt = now;
     map.getCanvas().style.cursor = layer3d.pick(e.point.x, e.point.y) ? 'pointer' : '';
   });
-
-  // ------------------------------------------------------------ auto tilt
-  // Seen from straight above, 3D buildings, terrain and aircraft all look flat. So the camera
-  // leans over by itself as you zoom in: top-down at globe scale, about 58 degrees at street scale.
-  // As soon as you (or a fly-to) set the tilt yourself it stops, until you zoom back out to the globe.
-  let autoTilt = true;
-  map.setTransformCameraUpdate((next) => {
-    const current = map.getPitch();
-    if (Math.abs(next.pitch - current) > 0.01) {
-      autoTilt = false;
-      return {};
-    }
-    if (next.zoom < 5) autoTilt = true;
-    if (!autoTilt) return {};
-    const f = Math.max(0, Math.min(1, (next.zoom - 5.5) / 7));
-    const target = 58 * f * f * (3 - 2 * f);
-    return Math.abs(target - current) > 0.01 ? { pitch: target } : {};
-  });
-  if (map.getPitch() < 1) map.jumpTo({ zoom: map.getZoom() });
 
   // ---------------------------------------------------------------- modes
   const modes = $('modes');
@@ -281,6 +286,15 @@ async function main(): Promise<void> {
     root.setProperty('--b1', `${(1.1 * s).toFixed(2)}px`);
     root.setProperty('--b2', `${(2.8 * s).toFixed(2)}px`);
     root.setProperty('--b3', `${(6 * s).toFixed(2)}px`);
+    // Set the blur inline as well: CSS minifiers have been seen to drop the unprefixed property.
+    const radii = [1.1 * s, 2.8 * s, 6 * s];
+    for (const band of document.querySelectorAll('#tiltshift .band')) {
+      band.querySelectorAll<HTMLElement>('i').forEach((el, k) => {
+        const value = `blur(${radii[k].toFixed(2)}px)`;
+        el.style.setProperty('backdrop-filter', value);
+        el.style.setProperty('-webkit-backdrop-filter', value);
+      });
+    }
   }
   map.on('pitch', updateBlur);
   applyModeClass();
@@ -447,7 +461,8 @@ async function main(): Promise<void> {
     refreshPanel();
     renderCard();
     const now = Date.now();
-    base.updateNight(now);
+    base.updateLight(now);
+    weather.tick(now);
     const c = map.getCenter();
     const hour = solarHour(c.lng, now);
     const hh = String(Math.floor(hour)).padStart(2, '0');
@@ -471,7 +486,7 @@ async function main(): Promise<void> {
   }, 500);
   refreshPanel();
   // Handy for poking around from the browser console.
-  (window as unknown as { tinyfoot: unknown }).tinyfoot = { map, layers, layer3d, ctx };
+  (window as unknown as { tinyfoot: unknown }).tinyfoot = { map, layers, layer3d, ctx, base, weather };
 }
 
 void main().catch((err) => {
